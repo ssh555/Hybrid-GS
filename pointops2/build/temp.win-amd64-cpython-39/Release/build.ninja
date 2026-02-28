@@ -1,0 +1,47 @@
+ninja_required_version = 1.3
+cxx = cl
+nvcc = C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.6\bin\nvcc
+
+cflags = /nologo /O2 /W3 /GL /DNDEBUG /MD /MD /wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /EHsc -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\torch\csrc\api\include -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\TH -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\THC "-IC:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.6\include" -IC:\Users\20994\anaconda3\envs\3d4dgs\include -IC:\Users\20994\anaconda3\envs\3d4dgs\Include "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\ATLMFC\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.22000.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\cppwinrt" "-IC:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\include\um"
+post_cflags = -g -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=pointops2_cuda -D_GLIBCXX_USE_CXX11_ABI=0 /std:c++14
+cuda_cflags = --use-local-env -Xcompiler /MD -Xcompiler /wd4819 -Xcompiler /wd4251 -Xcompiler /wd4244 -Xcompiler /wd4267 -Xcompiler /wd4275 -Xcompiler /wd4018 -Xcompiler /wd4190 -Xcompiler /EHsc -Xcudafe --diag_suppress=base_class_has_different_dll_interface -Xcudafe --diag_suppress=field_without_dll_interface -Xcudafe --diag_suppress=dll_interface_conflict_none_assumed -Xcudafe --diag_suppress=dll_interface_conflict_dllexport_assumed -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\torch\csrc\api\include -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\TH -IC:\Users\20994\anaconda3\envs\3d4dgs\lib\site-packages\torch\include\THC "-IC:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.6\include" -IC:\Users\20994\anaconda3\envs\3d4dgs\include -IC:\Users\20994\anaconda3\envs\3d4dgs\Include "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\ATLMFC\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.22000.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\cppwinrt" "-IC:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\include\um"
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -O2 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=pointops2_cuda -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_61,code=compute_61 -gencode=arch=compute_61,code=sm_61
+ldflags = 
+
+rule compile
+  command = cl /showIncludes $cflags -c $in /Fo$out $post_cflags
+  deps = msvc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\aggregation\aggregation_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\aggregation\aggregation_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\aggregation\aggregation_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\aggregation\aggregation_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\attention\attention_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\attention\attention_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\attention\attention_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\attention\attention_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\attention_v2\attention_cuda_kernel_v2.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\attention_v2\attention_cuda_kernel_v2.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\attention_v2\attention_cuda_v2.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\attention_v2\attention_cuda_v2.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\grouping\grouping_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\grouping\grouping_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\grouping\grouping_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\grouping\grouping_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\interpolation\interpolation_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\interpolation\interpolation_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\interpolation\interpolation_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\interpolation\interpolation_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\knnquery\knnquery_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\knnquery\knnquery_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\knnquery\knnquery_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\knnquery\knnquery_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\pointops_api.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\pointops_api.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\rpe\relative_pos_encoding_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\rpe\relative_pos_encoding_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\rpe\relative_pos_encoding_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\rpe\relative_pos_encoding_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\rpe_v2\relative_pos_encoding_cuda_kernel_v2.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\rpe_v2\relative_pos_encoding_cuda_kernel_v2.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\rpe_v2\relative_pos_encoding_cuda_v2.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\rpe_v2\relative_pos_encoding_cuda_v2.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\sampling\sampling_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\sampling\sampling_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\sampling\sampling_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\sampling\sampling_cuda_kernel.cu
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\subtraction\subtraction_cuda.obj: compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\subtraction\subtraction_cuda.cpp
+build D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\build\temp.win-amd64-cpython-39\Release\src\subtraction\subtraction_cuda_kernel.obj: cuda_compile D$:\Projects\BiShe\Code\3D-4DGS-main\pointops2\src\subtraction\subtraction_cuda_kernel.cu
+
+
+
+
+

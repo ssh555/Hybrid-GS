@@ -1,0 +1,22 @@
+# ninja log v7
+58	24624	7751341868816934	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/attention_v2/attention_cuda_v2.obj	e09a3567365cd614
+23	25063	7751341868476929	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/attention/attention_cuda.obj	d302eedc459ff693
+116	25471	7751341869406928	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/interpolation/interpolation_cuda.obj	aa6895bdbe82a7b1
+73	26076	7751341868966935	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/grouping/grouping_cuda.obj	ccdceda4aa65ad15
+3	26888	7751341868266988	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/aggregation/aggregation_cuda.obj	bca92d75b21e9353
+24650	48353	7751342114747382	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/knnquery/knnquery_cuda.obj	608aa828f7c0a117
+26094	48879	7751342129187718	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/rpe/relative_pos_encoding_cuda.obj	71f996cbebe7b22b
+45	68883	7751341868696928	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/attention_v2/attention_cuda_kernel_v2.obj	557fd55c8c694a7d
+48906	69748	7751342357300015	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/rpe_v2/relative_pos_encoding_cuda_v2.obj	d0836dc808f635ab
+89	70419	7751341869126934	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/grouping/grouping_cuda_kernel.obj	21af4d2ded3d9a67
+12	70711	7751341868366926	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/aggregation/aggregation_cuda_kernel.obj	d2681ed208a1f81d
+25492	71629	7751342123169691	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/pointops_api.obj	737291f72490dab0
+133	73481	7751341869586931	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/interpolation/interpolation_cuda_kernel.obj	4d4bfea279ae5496
+32	77457	7751341868567294	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/attention/attention_cuda_kernel.obj	efe5db27790b597f
+69049	89199	7751342558735692	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/sampling/sampling_cuda.obj	78adc1e7a8c533f9
+70424	89689	7751342572485912	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/subtraction/subtraction_cuda.obj	b7c23999de745528
+26911	95170	7751342137352821	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/rpe/relative_pos_encoding_cuda_kernel.obj	a22a786531d337d1
+25084	95232	7751342119088582	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/knnquery/knnquery_cuda_kernel.obj	8549fd938a70430
+48377	107086	7751342352010005	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/rpe_v2/relative_pos_encoding_cuda_kernel_v2.obj	21122b6248d902f4
+70715	116429	7751342575396217	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/subtraction/subtraction_cuda_kernel.obj	83f15d727eb3e065
+69770	117222	7751342565946361	D:/Projects/BiShe/Code/3D-4DGS-main/pointops2/build/temp.win-amd64-cpython-39/Release/src/sampling/sampling_cuda_kernel.obj	22d3df7664a04d72
