@@ -1,5 +1,5 @@
 # 文件：utils/trainer_4dgs.py
-from trainer_base import BaseTrainer
+from .trainer_base import BaseTrainer
 
 class Trainer4DGS(BaseTrainer):
     """原生 3D-4DGS 封装，使用全局平均时间尺度进行静态转化"""

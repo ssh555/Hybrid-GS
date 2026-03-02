@@ -1,7 +1,7 @@
 # 派生的 HybridGS 核心训练策略
 # Ours
 # 文件：utils/trainer_hybrid.py
-from trainer_base import TrainerSWinGS
+from .trainer_base import TrainerSWinGS
 
 class TrainerHybrid(TrainerSWinGS): # 继承SWinGS以获得滑动窗口能力
     """空间解耦(硬约束)与时间解耦(软约束)深度融合的混合模型"""

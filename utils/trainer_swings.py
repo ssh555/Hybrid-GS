@@ -1,5 +1,5 @@
 # 派生的 SWinGS 训练策略
-from trainer_base import BaseTrainer
+from .trainer_base import BaseTrainer
 
 class TrainerSWinGS(BaseTrainer):
     """引入滑动窗口和显式生命周期管理的长序列基线"""
