@@ -63,12 +63,20 @@ class GaussianModel:
     def __init__(self, sh_degree : int, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, force_sh_3d: bool = False, sh_degree_t : int = 0):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
+
+        # --- 原有 3D-4DGS 的基础属性 ---
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+
+        # 4DGS 特有的时间属性
+        self._t = torch.empty(0)       # 时间中心
+        self._t_scaling = torch.empty(0) # 时间缩放
+
+        # ... 其他原有的优化器和超参数定义 ...
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -100,7 +108,26 @@ class GaussianModel:
         self.static_max_radii2D = torch.empty(0)
         self.static_denom = torch.empty(0)
         self.static_xyz_gradient_accum = torch.empty(0)
+
+        # ==========================================================
+        # 新增扩展 1：为 SWinGS 长序列时间解耦准备的生命周期属性
+        # ==========================================================
+        self._start_frame = torch.empty(0, dtype=torch.int32)
+        self._expire_frame = torch.empty(0, dtype=torch.int32)
         
+        # ==========================================================
+        # 新增扩展 2：为 HybridGS 软硬约束准备的分类与追踪属性
+        # ==========================================================
+        # 动态/静态分类标识掩码: 
+        # 0 = 未分类 (初始状态)
+        # 1 = 绝对静止的背景 3D 高斯 (硬约束冻结)
+        # 2 = 前景 4D 高斯 (受软约束 L_reg_d 管理)
+        self._mask_dynamic = torch.empty(0, dtype=torch.int8)
+        
+        # 追踪属性：用于计算平均位移和最大瞬时位移
+        self._accumulated_displacement = torch.empty(0)
+        self._max_instantaneous_displacement = torch.empty(0)
+
         self.setup_functions()
 
     def capture(self):
@@ -830,3 +857,22 @@ class GaussianModel:
         self.prune_points(static_mask)
 
         self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+
+        # ==========================================================
+    
+    
+    # 以下为你需要添加到 GaussianModel 中的全新方法接口
+    # ==========================================================
+    # 提供统一的显存分配接口
+    def add_densification_stats(self):
+        # 扩展张量拼接逻辑
+        pass
+        
+    # 提供统一的梯度截断接口，用于 HybridGS 的硬约束降维
+    def convert_4d_to_3d(self, static_indices):
+        """将背景高斯永久固化为静态属性，截断时间属性梯度回传路径"""
+        with torch.no_grad():
+            self._mask_dynamic[static_indices] = 1 # 标记为绝对静止
+            # 抹除时间坐标和时间特征的梯度
+            self._t[static_indices].requires_grad_(False)
+            # 在此处实现具体的 4D -> 3D 张量降维操作

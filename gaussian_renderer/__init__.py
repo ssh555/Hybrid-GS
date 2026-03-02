@@ -1,5 +1,4 @@
 # 重构的混合前向渲染管线
-
 #
 # Copyright (C) 2023, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
@@ -19,10 +18,12 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 from collections import defaultdict
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, active_dynamic_mask=None):
     """
     Render the scene. 
-    
+    [新增参数说明]
+    active_dynamic_mask: 布尔型张量。在 SWinGS/HybridGS 模式下，用于过滤当前时间窗口内“存活”的动态 4D 高斯。
+                         在基线 3D-4DGS 模式下，该参数为 None，不进行过滤。
     Background tensor (bg_color) must be on GPU!
     """
  
@@ -118,7 +119,26 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
     
     flow_2d = torch.zeros_like(pc.get_xyz[:,:2])
-    
+
+    # ==============================================================================
+    # [新增] SWinGS / HybridGS 局部时间窗口掩码过滤 (Time Window Masking)
+    # 作用：只保留当前滑动窗口内“存活”的 4D 高斯，过期的或未出生的不参与渲染
+    # ==============================================================================
+    if active_dynamic_mask is not None:
+        if means2D is not None: means2D = means2D[active_dynamic_mask]
+        if means3D is not None: means3D = means3D[active_dynamic_mask]
+        if ts is not None: ts = ts[active_dynamic_mask]
+        if shs is not None: shs = shs[active_dynamic_mask]
+        if colors_precomp is not None: colors_precomp = colors_precomp[active_dynamic_mask]
+        if opacity is not None: opacity = opacity[active_dynamic_mask]
+        if scales is not None: scales = scales[active_dynamic_mask]
+        if scales_t is not None: scales_t = scales_t[active_dynamic_mask]
+        if rotations is not None: rotations = rotations[active_dynamic_mask]
+        if rotations_r is not None: rotations_r = rotations_r[active_dynamic_mask]
+        if cov3D_precomp is not None: cov3D_precomp = cov3D_precomp[active_dynamic_mask]
+        if flow_2d is not None: flow_2d = flow_2d[active_dynamic_mask]
+        if marginal_t is not None: marginal_t = marginal_t[active_dynamic_mask]
+
     # Prefilter
     if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
         mask = marginal_t[:,0] > 0.05
@@ -198,10 +218,23 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         rendered_image = rendered_image + (1 - alpha) * bg_color_from_envmap # * mask2[None]
     
     if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
-        radii_all = radii.new_zeros(mask.shape)
-        radii_all[mask] = radii
+        # 重构 radii 的形状，兼容 active_dynamic_mask
+        target_shape = active_dynamic_mask.shape if active_dynamic_mask is not None else mask.shape
+        radii_all = radii.new_zeros(target_shape)
+        
+        if active_dynamic_mask is not None:
+            # 只有活着的，并且过了 prefilter mask 的，才有 radius
+            active_radii = radii.new_zeros(active_dynamic_mask.sum())
+            active_radii[mask] = radii
+            radii_all[active_dynamic_mask] = active_radii
+        else:
+            radii_all[mask] = radii
     else:
-        radii_all = radii
+        if active_dynamic_mask is not None:
+            radii_all = radii.new_zeros(active_dynamic_mask.shape)
+            radii_all[active_dynamic_mask] = radii
+        else:
+            radii_all = radii
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

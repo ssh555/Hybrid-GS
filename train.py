@@ -34,6 +34,22 @@ from torch.utils.data import DataLoader
 from utils.mesh_utils import GaussianExtractor
 from utils.render_utils import generate_path, create_videos
 
+from utils.trainer_4dgs import Trainer4DGS
+from utils.trainer_swings import TrainerSWinGS
+from utils.trainer_hybrid import TrainerHybrid
+
+
+def trainer_factory(args, dataset, opt, pipe, testing_iterations, saving_iterations):
+    """工厂函数，根据参数动态实例化训练器"""
+    if args.model_type == 'baseline_4dgs':
+        return Trainer4DGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    elif args.model_type == 'swings':
+        return TrainerSWinGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    elif args.model_type == 'hybrid_gs':
+        return TrainerHybrid(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    else:
+        raise ValueError(f"未知的模型类型: {args.model_type}")
+    
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -439,10 +455,20 @@ def setup_seed(seed):
 
 if __name__ == "__main__":
     # Set up command line argument parser
-    parser = ArgumentParser(description="Training script parameters")
+    parser = ArgumentParser(description="混合3D与4D高斯场景重建统一训练框架")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    # 新增模型路由参数
+    parser.add_argument("--model_type", type=str, default="hybrid_gs", 
+                        choices=["baseline_4dgs", "swings", "hybrid_gs"], 
+                        help="选择要训练的模型基线")
+    # 预留给 SWinGS 和 HybridGS 的超参数
+    parser.add_argument("--swin_size", type=int, default=50, help="滑动窗口长度")
+    parser.add_argument("--tau_avg", type=float, default=0.01, help="硬约束平均位移阈值")
+    parser.add_argument("--tau_max", type=float, default=0.05, help="硬约束最大瞬时位移阈值")
+    parser.add_argument("--lambda_d", type=float, default=0.1, help="位移收敛软约束惩罚系数")
+
     parser.add_argument("--config", type=str)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
@@ -474,12 +500,14 @@ if __name__ == "__main__":
         else:
             assert hasattr(args, key), key
             setattr(args, key, host[key])
+    
     for k in cfg.keys():
         recursive_merge(k, cfg)
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations,500)]
     
+    # 系统状态初始化
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)
@@ -487,11 +515,28 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    if args.val == False:
-        training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
-                args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size)
 
+    # ---------------------------------------------------------
+    # 核心路由：使用 OOP 框架替代原有的 training() 
+    # ---------------------------------------------------------
+    if args.val == False:
+        print(f"\n[系统通知] 正在启动训练管线，当前选择的模型架构为: {args.model_type.upper()}")
+        # training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
+        #         args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size)
+        # 将原有的 lp.extract(args) 提取出来，传入工厂函数
+        trainer = trainer_factory(
+            args=args, 
+            dataset=lp.extract(args), 
+            opt=op.extract(args), 
+            pipe=pp.extract(args), 
+            testing_iterations=args.test_iterations, 
+            saving_iterations=args.save_iterations
+        )
+        # 启动统一的训练循环
+        trainer.train()
     else:
+        # 验证模式保持不变
+        print("\n[系统通知] 启动验证模式 (Validation)...")
         validation(lp.extract(args), op.extract(args), pp.extract(args),args.start_checkpoint,args.gaussian_dim, 
                    args.time_duration,args.rot_4d, args.force_sh_3d, args.num_pts, args.num_pts_ratio)
         
