@@ -1,9 +1,231 @@
 # 文件：utils/trainer_4dgs.py
-from .trainer_base import BaseTrainer
+import os
+import torch
+import random
+from torch import nn
+from random import randint
+from tqdm import tqdm
+from utils.loss_utils import l1_loss, ssim
+from gaussian_renderer import render
+from scene.gaussian_model import GaussianModel
+from utils.general_utils import knn
+from utils.trainer_base import BaseTrainer
 
 class Trainer4DGS(BaseTrainer):
-    """原生 3D-4DGS 封装，使用全局平均时间尺度进行静态转化"""
-    
-    def adaptive_convert_4d_to_3d(self):
-        """原生的定期探针：提取时间维度缩放参数判定静态区域并降维"""
-        pass
+    """
+    原生 3D-4DGS 完整版封装
+    包含完整的环境贴图优化、多重正则化损失(Rigid/Motion)以及梯度累加机制。
+    """
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
+        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+        
+        # 1. 修正时间维度缩放 (复刻原版逻辑)
+        if hasattr(self.dataset, 'frame_ratio') and self.dataset.frame_ratio > 1:
+            self.args.time_duration = [self.args.time_duration[0] / self.dataset.frame_ratio, 
+                                       self.args.time_duration[1] / self.dataset.frame_ratio]
+            
+        # 2. 初始化 GaussianModel
+        self.gaussians = GaussianModel(
+            dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3, 
+            gaussian_dim=self.args.gaussian_dim, 
+            time_duration=self.args.time_duration, 
+            rot_4d=self.args.rot_4d, 
+            force_sh_3d=self.args.force_sh_3d, 
+            sh_degree_t=2 if self.pipe.eval_shfs_4d else 0
+        )
+        self.gaussians.training_setup(self.opt)
+        
+        # 3. 恢复 Checkpoint
+        self.first_iter = 0
+        if self.args.start_checkpoint:
+            (model_params, first_iter) = torch.load(self.args.start_checkpoint)
+            self.gaussians.restore(model_params, self.opt)
+            self.first_iter = first_iter
+
+        # 4. 背景颜色
+        bg_color = [1, 1, 1] if hasattr(self.dataset, 'white_background') and self.dataset.white_background else [0, 0, 0]
+        self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        
+        # 5. 环境光贴图优化
+        if self.pipe.env_map_res:
+            self.env_map = nn.Parameter(torch.zeros((3, self.pipe.env_map_res, self.pipe.env_map_res), dtype=torch.float, device="cuda").requires_grad_(True))
+            self.env_map_optimizer = torch.optim.Adam([self.env_map], lr=self.opt.feature_lr, eps=1e-15)
+        else:
+            self.env_map = None
+            self.env_map_optimizer = None
+        self.gaussians.env_map = self.env_map
+
+    def train(self):
+        """完整复刻原版 3D-4DGS 的训练大循环，并接入 Lazy DataLoader"""
+        print(f"\n[Trainer4DGS] 开始训练 Baseline，总迭代次数: {self.opt.iterations}")
+        self.metrics_tracker.start_timer()
+        
+        iter_start = torch.cuda.Event(enable_timing=True)
+        iter_end = torch.cuda.Event(enable_timing=True)
+        
+        progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="Training progress")
+        total_frames = self.dataset.total_frames
+        
+        for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
+            iter_start.record()
+            self.gaussians.update_learning_rate(iteration)
+            
+            # 每 1000 步提升 SH 阶数
+            if iteration % self.opt.sh_increase_interval == 0:
+                self.gaussians.oneupSHdegree()
+                
+            if (iteration - 1) == self.args.debug_from:
+                self.pipe.debug = True
+                
+            # 批处理容器初始化
+            batch_size = self.args.batch_size
+            batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
+            batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
+            
+            loss = 0
+            # =============== 批处理循环 ===============
+            for batch_idx in range(batch_size):
+                # 接入 Lazy DataLoader：随机选取一帧
+                frame_id = randint(0, total_frames - 1)
+                viewpoint_cam = self.dataset.get_camera_data(frame_id)
+                gt_image = viewpoint_cam.original_image.cuda()
+                
+                # 前向渲染
+                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=None)
+                image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                alpha = render_pkg["alpha"]
+                
+                viewspace_point_tensor_static = render_pkg.get("viewspace_points_static", [])
+                visibility_filter_static = render_pkg.get("visibility_filter_static", [])
+                radii_static = render_pkg.get("radii_static", [])
+
+                # 计算基础 Loss
+                Ll1 = l1_loss(image, gt_image)
+                Lssim = 1.0 - ssim(image, gt_image)
+                current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
+                
+                # 计算 Opa Mask Loss
+                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask'):
+                    o = alpha.clamp(1e-6, 1-1e-6)
+                    sky = 1 - viewpoint_cam.gt_alpha_mask
+                    Lopa_mask = (- sky * torch.log(1 - o)).mean()
+                    current_loss += self.opt.lambda_opa_mask * Lopa_mask
+                    
+                # 计算 Rigid Loss (刚性正则化)
+                if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
+                    k = 20
+                    xyz_cur = self.gaussians.get_xyz
+                    idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
+                    weight = torch.exp(-100 * dist)
+                    vel_dist = torch.norm(velocity[idx] - velocity[None, :, None], p=2, dim=-1)
+                    Lrigid = (weight * vel_dist).sum() / k / xyz_cur.shape[0]
+                    current_loss += self.opt.lambda_rigid * Lrigid
+                    
+                # 计算 Motion Loss (运动正则化)
+                if hasattr(self.opt, 'lambda_motion') and self.opt.lambda_motion > 0:
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
+                    Lmotion = velocity.norm(p=2, dim=1).mean()
+                    current_loss += self.opt.lambda_motion * Lmotion
+
+                current_loss = current_loss / batch_size
+                current_loss.backward()
+                loss += current_loss.item()
+                
+                # 记录梯度和可见性
+                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
+                batch_radii.append(radii)
+                batch_visibility_filter.append(visibility_filter)
+
+                static = len(viewspace_point_tensor_static) > 0
+                if static:
+                    batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
+                    batch_radii_static.append(radii_static)
+                    batch_visibility_filter_static.append(visibility_filter_static)
+
+            # =============== 梯度累加逻辑 ===============
+            if batch_size > 1:
+                visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
+                visibility_filter = visibility_count > 0
+                radii = torch.stack(batch_radii, 1).max(1)[0]
+                batch_viewspace_point_grad = torch.stack(batch_point_grad, 1).sum(1)
+                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
+                
+                if static:
+                    visibility_count_static = torch.stack(batch_visibility_filter_static, 1).sum(1)
+                    visibility_filter_static = visibility_count_static > 0
+                    radii_static = torch.stack(batch_radii_static, 1).max(1)[0]
+                    batch_viewspace_point_grad_static = torch.stack(batch_point_grad_static, 1).sum(1)
+                    batch_viewspace_point_grad_static[visibility_filter_static] = batch_viewspace_point_grad_static[visibility_filter_static] * batch_size / visibility_count_static[visibility_filter_static]
+                    batch_viewspace_point_grad_static = batch_viewspace_point_grad_static.unsqueeze(1)
+                
+                if self.gaussians.gaussian_dim == 4:
+                    batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
+                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                    batch_t_grad = batch_t_grad.unsqueeze(1)
+            else:
+                if self.gaussians.gaussian_dim == 4:
+                    batch_t_grad = self.gaussians._t.grad.clone().detach()
+                    
+            iter_end.record()
+
+            # =============== 致密化与剪枝 (Densification) ===============
+            with torch.no_grad():
+                # 定期记录显存与时间
+                if iteration % 100 == 0:
+                    self.metrics_tracker.record_vram(iteration)
+                    self.metrics_tracker.record_training_time(iteration)
+                    
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
+                    self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    if static:
+                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
+                    
+                    if batch_size == 1:
+                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                    else:
+                        self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                        if static:
+                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
+
+                    if iteration > self.opt.densify_from_iter:
+                        size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
+                        if iteration % self.opt.densification_interval == 0:
+                            # 传入 Dataset 的场景边界 (如果 lazy loader 没有提供 cameras_extent，可以用常数替代，比如 1.0)
+                            extent = getattr(self.dataset, 'cameras_extent', 1.0)
+                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            
+                            # 原版 4DGS 核心逻辑：动态探针转静态
+                            if hasattr(self.gaussians, 'dynamic2static'):
+                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
+                                
+                    if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                        self.gaussians.reset_opacity()
+
+                # =============== 优化器步进 ===============
+                if iteration < self.opt.iterations:
+                    self.gaussians.optimizer.step()
+                    self.gaussians.optimizer.zero_grad(set_to_none=True)
+                    if self.env_map_optimizer and iteration < self.pipe.env_optimize_until:
+                        self.env_map_optimizer.step()
+                        self.env_map_optimizer.zero_grad(set_to_none=True)
+
+                # =============== 进度条与日志保存 ===============
+                if iteration % 10 == 0:
+                    postfix = {"Loss": f"{loss:.4f}", "Pts": self.gaussians.get_xyz.shape[0]}
+                    if static: postfix["Static"] = self.gaussians.get_static_xyz.shape[0]
+                    progress_bar.set_postfix(postfix)
+                    progress_bar.update(10)
+                    
+                if iteration in self.saving_iterations:
+                    print(f"\n[Trainer4DGS] 正在保存模型至 Iteration {iteration}")
+                    os.makedirs(self.args.model_path, exist_ok=True)
+                    torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
+
+        progress_bar.close()
+        
+        # 训练结束，保存追踪日志
+        log_path = os.path.join(self.args.model_path, "baseline_metrics.json")
+        self.metrics_tracker.save_log(log_path)
+        print(f"[Trainer4DGS] 训练完成！指标已保存至 {log_path}")
