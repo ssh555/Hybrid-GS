@@ -1,3 +1,4 @@
+# 文件：utils/metrics_tracker.py
 import torch
 import time
 import json
@@ -9,17 +10,22 @@ class MetricsTracker:
         if cls._instance is None:
             cls._instance = super(MetricsTracker, cls).__new__(cls)
             cls._instance.metrics_log = {
-                "iteration": [],
+                # --- 独立双时间轴 ---
+                "train_iterations": [],    # 对应高频记录的训练指标 (如每100步)
+                "test_iterations": [],     # 对应低频记录的测试指标 (如7000, 30000步)
+                
+                # --- 空间与时间质量指标 (挂载于 test_iterations) ---
                 "psnr": [],
                 "ssim": [],
                 "lpips": [],
-                "vram_peak_mb": [],
-                "fps": [],
-                # ================= 新增核心指标 =================
+                "fps": [],                 # 渲染评估时的平均 FPS
+                "temporal_psnr": [],       # 记录时间一致性/抗闪烁度 (T-PSNR)
+                
+                # --- 效率与状态指标 (挂载于 train_iterations) ---
+                "vram_peak_mb": [],        # 捕捉VRAM消耗
                 "training_time_s": [],     # 记录训练耗时，证明 HybridGS 更快
                 "num_3d_gaussians": [],    # 记录被硬约束冻结的静态高斯数量
                 "num_4d_gaussians": [],    # 记录活跃的动态前景高斯数量
-                "temporal_psnr": []        # 记录时间一致性/抗闪烁度 (T-PSNR)
             }
             cls._instance.start_time = None
         return cls._instance
@@ -28,27 +34,31 @@ class MetricsTracker:
         """记录训练开始的绝对时间"""
         self.start_time = time.time()
         
-    def record_training_time(self, iteration):
-        """记录从开始到当前迭代的累计训练时间"""
-        if self.start_time is not None:
-            elapsed = time.time() - self.start_time
-            self.metrics_log["training_time_s"].append(elapsed)
-            # 保证列表长度一致（如果不独立记录的话，建议和其他指标一起append）
-
-    def record_gaussian_stats(self, num_3d, num_4d):
+    def record_training_stats(self, iteration, num_3d, num_4d):
         """
-        记录3D和4D高斯的数量。
-        用于在论文中证明：随着时间推移，背景被转化为3D高斯，4D高斯数量保持在一个低水平。
+        统一记录所有高频训练状态指标，确保数组长度绝对一致！
+        供论文中证明：背景转化为3D高斯，4D高斯数量维持低位，且时间/显存下降。
         """
+        self.metrics_log["train_iterations"].append(iteration)
+        
+        # 记录时间
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        self.metrics_log["training_time_s"].append(elapsed)
+        
+        # 记录高斯数量
         self.metrics_log["num_3d_gaussians"].append(num_3d)
         self.metrics_log["num_4d_gaussians"].append(num_4d)
-
-    def record_vram(self, iteration):
-        """利用底层的接口捕捉VRAM消耗"""
+        
+        # 记录显存
         vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
-        if iteration not in self.metrics_log["iteration"]:
-            self.metrics_log["iteration"].append(iteration)
         self.metrics_log["vram_peak_mb"].append(vram_mb)
+
+    def record_eval_metrics(self, iteration, avg_psnr, avg_ssim, avg_fps):
+        """统一记录测试集评估指标"""
+        self.metrics_log["test_iterations"].append(iteration)
+        self.metrics_log["psnr"].append(avg_psnr)
+        self.metrics_log["ssim"].append(avg_ssim)
+        self.metrics_log["fps"].append(avg_fps)
         
     def measure_fps(self, render_func, *args, **kwargs):
         """利用CUDA底层事件同步机制包裹渲染核心函数，获取极致精准的渲染耗时"""
@@ -62,20 +72,16 @@ class MetricsTracker:
         
         elapsed_time_ms = start_event.elapsed_time(end_event)
         fps = 1000.0 / elapsed_time_ms if elapsed_time_ms > 0 else 0
-        self.metrics_log["fps"].append(fps)
+        
+        # 注意：这里不再单独 append fps，直接返回交给 evaluate 函数计算平均值
         return out, fps
         
     def calculate_image_metrics(self, gt_image, rendered_image):
         """自动计算空间域指标：PSNR、SSIM与LPIPS"""
-        # 具体指标计算代码
         pass
 
     def calculate_temporal_metrics(self, rendered_seq, gt_seq):
-        """
-        计算时间域指标：Temporal PSNR / Flickering Metric
-        输入必须是连续的几帧图像，评估帧间连贯性。
-        用于证明 SWinGS 和 L_reg_d 软约束抑制了闪烁。
-        """
+        """计算时间域指标：Temporal PSNR / Flickering Metric"""
         pass
         
     def save_log(self, filepath):

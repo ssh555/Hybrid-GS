@@ -100,10 +100,7 @@ class Trainer4DGS(BaseTrainer):
         avg_fps = total_fps / len(test_cameras)
         
         # 将测试结果记录到 MetricsTracker 的字典中
-        self.metrics_tracker.metrics_log["iteration"].append(iteration)
-        self.metrics_tracker.metrics_log["psnr"].append(avg_psnr)
-        self.metrics_tracker.metrics_log["ssim"].append(avg_ssim)
-        self.metrics_tracker.metrics_log["fps"].append(avg_fps)
+        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
         
         print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
@@ -228,7 +225,7 @@ class Trainer4DGS(BaseTrainer):
                     
                     num_4d = self.gaussians.get_xyz.shape[0]
                     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
-                    self.metrics_tracker.record_gaussian_stats(num_3d, num_4d)
+                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
                     
                 if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
