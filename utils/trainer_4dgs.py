@@ -1,3 +1,4 @@
+# 3D4DGS模型封装类
 # 文件：utils/trainer_4dgs.py
 import os
 import torch
@@ -6,6 +7,7 @@ from torch import nn
 from random import randint
 from tqdm import tqdm
 from utils.loss_utils import l1_loss, ssim
+from utils.image_utils import psnr # 确保导入了 psnr
 from gaussian_renderer import render
 from scene.gaussian_model import GaussianModel
 from utils.general_utils import knn
@@ -13,13 +15,14 @@ from utils.trainer_base import BaseTrainer
 
 class Trainer4DGS(BaseTrainer):
     """
-    原生 3D-4DGS 完整版封装
-    包含完整的环境贴图优化、多重正则化损失(Rigid/Motion)以及梯度累加机制。
+    原生 3D-4DGS 完整版封装 (Baseline)
+    包含环境贴图优化、多重正则化损失(Rigid/Motion)、梯度累加机制，
+    并完整接入了 Lazy DataLoader 与全方位评估追踪。
     """
     def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
         super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
         
-        # 1. 修正时间维度缩放 (复刻原版逻辑)
+        # 1. 修正时间维度缩放
         if hasattr(self.dataset, 'frame_ratio') and self.dataset.frame_ratio > 1:
             self.args.time_duration = [self.args.time_duration[0] / self.dataset.frame_ratio, 
                                        self.args.time_duration[1] / self.dataset.frame_ratio]
@@ -55,8 +58,57 @@ class Trainer4DGS(BaseTrainer):
             self.env_map_optimizer = None
         self.gaussians.env_map = self.env_map
 
+    @torch.no_grad()
+    def evaluate(self, iteration):
+        """
+        在特定的 iteration 执行测试集评估，并将 PSNR、SSIM 和 FPS 记入 Tracker。
+        使用 @torch.no_grad() 是为了在评估时不计算梯度，节省显存并提速。
+        """
+        print(f"\n[评估] 正在执行 Iteration {iteration} 的测试集评估...")
+        
+        test_cameras = self.dataset.getTestCameras() if hasattr(self.dataset, 'getTestCameras') else []
+        if not test_cameras:
+            print("[警告] 未找到测试集相机，跳过评估。")
+            return
+            
+        total_psnr = 0.0
+        total_ssim = 0.0
+        total_fps = 0.0
+        
+        for viewpoint_cam in tqdm(test_cameras, desc="Testing"):
+            gt_image = viewpoint_cam.original_image.cuda()
+            
+            # 使用 MetricsTracker 包装以获取精准渲染耗时
+            render_pkg, fps = self.metrics_tracker.measure_fps(
+                render, 
+                viewpoint_camera=viewpoint_cam, 
+                pc=self.gaussians, 
+                pipe=self.pipe, 
+                bg_color=self.background, 
+                active_dynamic_mask=None
+            )
+            
+            image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+            
+            # 累计指标
+            total_psnr += psnr(image, gt_image).mean().item()
+            total_ssim += ssim(image, gt_image).mean().item()
+            total_fps += fps
+            
+        avg_psnr = total_psnr / len(test_cameras)
+        avg_ssim = total_ssim / len(test_cameras)
+        avg_fps = total_fps / len(test_cameras)
+        
+        # 将测试结果记录到 MetricsTracker 的字典中
+        self.metrics_tracker.metrics_log["iteration"].append(iteration)
+        self.metrics_tracker.metrics_log["psnr"].append(avg_psnr)
+        self.metrics_tracker.metrics_log["ssim"].append(avg_ssim)
+        self.metrics_tracker.metrics_log["fps"].append(avg_fps)
+        
+        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+
     def train(self):
-        """完整复刻原版 3D-4DGS 的训练大循环，并接入 Lazy DataLoader"""
+        """完整复刻原版 3D-4DGS 的训练大循环，接入 Lazy DataLoader 与全面评估"""
         print(f"\n[Trainer4DGS] 开始训练 Baseline，总迭代次数: {self.opt.iterations}")
         self.metrics_tracker.start_timer()
         
@@ -70,14 +122,12 @@ class Trainer4DGS(BaseTrainer):
             iter_start.record()
             self.gaussians.update_learning_rate(iteration)
             
-            # 每 1000 步提升 SH 阶数
             if iteration % self.opt.sh_increase_interval == 0:
                 self.gaussians.oneupSHdegree()
                 
             if (iteration - 1) == self.args.debug_from:
                 self.pipe.debug = True
                 
-            # 批处理容器初始化
             batch_size = self.args.batch_size
             batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
             batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
@@ -85,7 +135,7 @@ class Trainer4DGS(BaseTrainer):
             loss = 0
             # =============== 批处理循环 ===============
             for batch_idx in range(batch_size):
-                # 接入 Lazy DataLoader：随机选取一帧
+                # Lazy DataLoader：随机选取一帧
                 frame_id = randint(0, total_frames - 1)
                 viewpoint_cam = self.dataset.get_camera_data(frame_id)
                 gt_image = viewpoint_cam.original_image.cuda()
@@ -99,19 +149,19 @@ class Trainer4DGS(BaseTrainer):
                 visibility_filter_static = render_pkg.get("visibility_filter_static", [])
                 radii_static = render_pkg.get("radii_static", [])
 
-                # 计算基础 Loss
+                # 基础光度损失
                 Ll1 = l1_loss(image, gt_image)
                 Lssim = 1.0 - ssim(image, gt_image)
                 current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
                 
-                # 计算 Opa Mask Loss
-                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask'):
+                # Opa Mask Loss
+                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
                     o = alpha.clamp(1e-6, 1-1e-6)
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     Lopa_mask = (- sky * torch.log(1 - o)).mean()
                     current_loss += self.opt.lambda_opa_mask * Lopa_mask
                     
-                # 计算 Rigid Loss (刚性正则化)
+                # Rigid Loss (刚性正则化)
                 if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
                     k = 20
                     xyz_cur = self.gaussians.get_xyz
@@ -122,7 +172,7 @@ class Trainer4DGS(BaseTrainer):
                     Lrigid = (weight * vel_dist).sum() / k / xyz_cur.shape[0]
                     current_loss += self.opt.lambda_rigid * Lrigid
                     
-                # 计算 Motion Loss (运动正则化)
+                # Motion Loss (运动正则化)
                 if hasattr(self.opt, 'lambda_motion') and self.opt.lambda_motion > 0:
                     _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
                     Lmotion = velocity.norm(p=2, dim=1).mean()
@@ -132,7 +182,6 @@ class Trainer4DGS(BaseTrainer):
                 current_loss.backward()
                 loss += current_loss.item()
                 
-                # 记录梯度和可见性
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
@@ -170,12 +219,16 @@ class Trainer4DGS(BaseTrainer):
                     
             iter_end.record()
 
-            # =============== 致密化与剪枝 (Densification) ===============
+            # =============== 致密化与剪枝 ===============
             with torch.no_grad():
-                # 定期记录显存与时间
+                # [核心指标追踪]：显存、耗时、3D/4D高斯数量
                 if iteration % 100 == 0:
                     self.metrics_tracker.record_vram(iteration)
                     self.metrics_tracker.record_training_time(iteration)
+                    
+                    num_4d = self.gaussians.get_xyz.shape[0]
+                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
+                    self.metrics_tracker.record_gaussian_stats(num_3d, num_4d)
                     
                 if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -192,11 +245,8 @@ class Trainer4DGS(BaseTrainer):
                     if iteration > self.opt.densify_from_iter:
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0:
-                            # 传入 Dataset 的场景边界 (如果 lazy loader 没有提供 cameras_extent，可以用常数替代，比如 1.0)
                             extent = getattr(self.dataset, 'cameras_extent', 1.0)
                             self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, extent, size_threshold, self.opt.densify_grad_t_threshold)
-                            
-                            # 原版 4DGS 核心逻辑：动态探针转静态
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
@@ -211,12 +261,16 @@ class Trainer4DGS(BaseTrainer):
                         self.env_map_optimizer.step()
                         self.env_map_optimizer.zero_grad(set_to_none=True)
 
-                # =============== 进度条与日志保存 ===============
+                # =============== 进度与评估 ===============
                 if iteration % 10 == 0:
                     postfix = {"Loss": f"{loss:.4f}", "Pts": self.gaussians.get_xyz.shape[0]}
                     if static: postfix["Static"] = self.gaussians.get_static_xyz.shape[0]
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
+                
+                # [触发测试集评估]
+                if iteration in self.testing_iterations:
+                    self.evaluate(iteration)
                     
                 if iteration in self.saving_iterations:
                     print(f"\n[Trainer4DGS] 正在保存模型至 Iteration {iteration}")
@@ -225,7 +279,7 @@ class Trainer4DGS(BaseTrainer):
 
         progress_bar.close()
         
-        # 训练结束，保存追踪日志
+        # 保存最终追踪日志
         log_path = os.path.join(self.args.model_path, "baseline_metrics.json")
         self.metrics_tracker.save_log(log_path)
         print(f"[Trainer4DGS] 训练完成！指标已保存至 {log_path}")
