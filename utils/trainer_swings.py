@@ -204,7 +204,9 @@ class TrainerSWinGS(Trainer4DGS):
                 if hasattr(self.opt, 'lambda_motion') and self.opt.lambda_motion > 0:
                     _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
                     active_velocity = velocity[active_mask] if active_mask is not None else velocity
-                    current_loss += self.opt.lambda_motion * active_velocity.norm(p=2, dim=1).mean()
+                    # [核心修复：增加非空判定，防止 NaN]
+                    if active_velocity.shape[0] > 0:
+                        current_loss += self.opt.lambda_motion * active_velocity.norm(p=2, dim=1).mean()
 
                 current_loss = current_loss / batch_size
                 current_loss.backward()

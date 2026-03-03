@@ -57,12 +57,6 @@ class TrainerHybrid(TrainerSWinGS):
                 
                 # [核心斩断逻辑]：永久冻结为 3D 静态背景 (mask = 1)
                 self.gaussians._mask_dynamic[global_static_indices] = 1
-                
-                # 截断时间属性的梯度回传，物理上将其降维为 3D 高斯
-                if self.gaussians._t.requires_grad:
-                    self.gaussians._t[global_static_indices].requires_grad_(False)
-                if hasattr(self.gaussians, '_scaling_t') and self.gaussians._scaling_t.requires_grad:
-                    self.gaussians._scaling_t[global_static_indices].requires_grad_(False)
 
     def train(self):
         """重写训练大循环，全面注入软硬约束"""
@@ -138,9 +132,11 @@ class TrainerHybrid(TrainerSWinGS):
                 # 仅对当前出场的高斯施加软约束惩罚
                 active_velocity = velocity[active_mask] if active_mask is not None else velocity
                 
-                # 植入位移收敛正则化项
-                l_reg_d = self.lambda_d * active_velocity.norm(p=2, dim=1).mean()
-                current_loss += l_reg_d  
+                # [核心修复：增加非空判定，防止 NaN]
+                if active_velocity.shape[0] > 0:
+                    # 植入位移收敛正则化项
+                    l_reg_d = self.lambda_d * active_velocity.norm(p=2, dim=1).mean()
+                    current_loss += l_reg_d
                 
                 # --- 保留原版的刚性约束 (Rigid Loss) ---
                 if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
@@ -238,6 +234,14 @@ class TrainerHybrid(TrainerSWinGS):
                         decay_factor = 1.0 / age.float()
                         if self.gaussians._xyz.grad is not None:
                             self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
+
+                    # [新增：核心修复，安全抹除静态背景的时间梯度]
+                    static_mask = (self.gaussians._mask_dynamic == 1)
+                    if static_mask.any():
+                        if self.gaussians._t.grad is not None:
+                            self.gaussians._t.grad[static_mask] = 0.0
+                        if hasattr(self.gaussians, '_scaling_t') and self.gaussians._scaling_t.grad is not None:
+                            self.gaussians._scaling_t.grad[static_mask] = 0.0
 
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad(set_to_none=True)

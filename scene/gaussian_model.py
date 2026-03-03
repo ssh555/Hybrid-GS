@@ -885,19 +885,3 @@ class GaussianModel:
 
         # ==========================================================
     
-    
-    # 以下为你需要添加到 GaussianModel 中的全新方法接口
-    # ==========================================================
-    # 提供统一的显存分配接口
-    def add_densification_stats(self):
-        # 扩展张量拼接逻辑
-        pass
-        
-    # 提供统一的梯度截断接口，用于 HybridGS 的硬约束降维
-    def convert_4d_to_3d(self, static_indices):
-        """将背景高斯永久固化为静态属性，截断时间属性梯度回传路径"""
-        with torch.no_grad():
-            self._mask_dynamic[static_indices] = 1 # 标记为绝对静止
-            # 抹除时间坐标和时间特征的梯度
-            self._t[static_indices].requires_grad_(False)
-            # 在此处实现具体的 4D -> 3D 张量降维操作

@@ -1,0 +1,2128 @@
+diff --git a/arguments/__init__.py b/arguments/__init__.py
+index 4148e65..d763519 100644
+--- a/arguments/__init__.py
++++ b/arguments/__init__.py
+@@ -62,6 +62,12 @@ class ModelParams(ParamGroup):
+         self.from3dgs = ""
+         self.start_timestamp = 0
+         self.end_timestamp = -1
++
++        # ==========================================================
++        # [新增] 路由模型类型 (Baseline, SWinGS, HybridGS)
++        # ==========================================================
++        self.model_type = "hybrid_gs"
++
+         super().__init__(parser, "Loading Parameters", sentinel)
+ 
+     def extract(self, args):
+@@ -109,6 +115,15 @@ class OptimizationParams(ParamGroup):
+         self.lambda_rigid = 0.0
+         self.lambda_motion = 0.0
+         self.scale_t_threshold =3.0
++
++        # ==========================================================
++        # [新增] SWinGS 与 HybridGS 专属超参数
++        # ==========================================================
++        self.swin_size = 50         # SWinGS: 滑动窗口大小 (例如每次只看50帧)
++        self.tau_avg = 0.01         # HybridGS 硬约束: 平均位移阈值
++        self.tau_max = 0.05         # HybridGS 硬约束: 最大瞬时位移阈值
++        self.lambda_d = 0.1         # HybridGS 软约束: 位移收敛正则化惩罚系数
++
+         super().__init__(parser, "Optimization Parameters")
+ 
+ def get_combined_args(parser : ArgumentParser):
+diff --git a/configs/n3v/default.yaml b/configs/n3v/default.yaml
+index e4e2b83..cb3e802 100644
+--- a/configs/n3v/default.yaml
++++ b/configs/n3v/default.yaml
+@@ -8,13 +8,12 @@ batch_size: 4
+ exhaust_test: False
+ # start_checkpoint: "output/$dataset/chkpnt6000.pth"
+ 
+-
+ ModelParams:
+   sh_degree: 3
+-  # source_path: ".../$dataset"
+-  # model_path: "output/$dataset"
++  source_path: ".../$dataset"
++  model_path: "output/$dataset"
+   images: "images"
+-  resolution: 1 # use 2 for the original resolution dataset!
++  resolution: 1 
+   white_background: False
+   data_device: "cuda"
+   eval: True
+@@ -23,6 +22,8 @@ ModelParams:
+   loaded_pth: ""
+   frame_ratio: 1
+   dataloader: True
++  # [核心路由] 指定使用的模型类型
++  model_type: "hybrid_gs"   # 可选值: baseline_4dgs, swings, hybrid_gs
+ 
+ PipelineParams:
+   convert_SHs_python: False
+@@ -34,12 +35,12 @@ PipelineParams:
+   eval_shfs_4d: True
+ 
+ OptimizationParams:
+-  iterations: 6_000
++  iterations: 6000
+   position_lr_init: 0.00016
+   position_t_lr_init: -1.0
+   position_lr_final: 0.0000016
+   position_lr_delay_mult: 0.01
+-  position_lr_max_steps: 30_000
++  position_lr_max_steps: 30000
+   feature_lr: 0.0025
+   opacity_lr: 0.05
+   scaling_lr: 0.005
+@@ -50,12 +51,20 @@ OptimizationParams:
+   densification_interval: 100 
+   opacity_reset_interval: 30000
+   densify_from_iter: 500 
+-  densify_until_iter: 15_000
++  densify_until_iter: 15000
+   densify_grad_threshold: 0.0002
+-  densify_grad_t_threshold: 0.0002 / 40 
++  densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
+   densify_until_num_points: -1
+   final_prune_from_iter: -1
+   sh_increase_interval: 1000
+   lambda_opa_mask: 0.0
+   lambda_rigid: 0.0
+   lambda_motion: 0.0
++  
++  # ==========================================================
++  # [新增] SWinGS 与 HybridGS 专属超参数
++  # ==========================================================
++  swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
++  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
++  tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
++  lambda_d: 0.1             # HybridGS 软约束：位移收敛正则化系数
+\ No newline at end of file
+diff --git a/gaussian_renderer/__init__.py b/gaussian_renderer/__init__.py
+index 4b46ae4..f98f03c 100644
+--- a/gaussian_renderer/__init__.py
++++ b/gaussian_renderer/__init__.py
+@@ -1,3 +1,4 @@
++# 重构的混合前向渲染管线
+ #
+ # Copyright (C) 2023, Inria
+ # GRAPHDECO research group, https://team.inria.fr/graphdeco
+@@ -17,10 +18,12 @@ from scene.gaussian_model import GaussianModel
+ from utils.sh_utils import eval_sh, eval_shfs_4d
+ from collections import defaultdict
+ 
+-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
++def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, active_dynamic_mask=None):
+     """
+     Render the scene. 
+-    
++    [新增参数说明]
++    active_dynamic_mask: 布尔型张量。在 SWinGS/HybridGS 模式下，用于过滤当前时间窗口内“存活”的动态 4D 高斯。
++                         在基线 3D-4DGS 模式下，该参数为 None，不进行过滤。
+     Background tensor (bg_color) must be on GPU!
+     """
+  
+@@ -116,7 +119,26 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+         colors_precomp = override_color
+     
+     flow_2d = torch.zeros_like(pc.get_xyz[:,:2])
+-    
++
++    # ==============================================================================
++    # [新增] SWinGS / HybridGS 局部时间窗口掩码过滤 (Time Window Masking)
++    # 作用：只保留当前滑动窗口内“存活”的 4D 高斯，过期的或未出生的不参与渲染
++    # ==============================================================================
++    if active_dynamic_mask is not None:
++        if means2D is not None: means2D = means2D[active_dynamic_mask]
++        if means3D is not None: means3D = means3D[active_dynamic_mask]
++        if ts is not None: ts = ts[active_dynamic_mask]
++        if shs is not None: shs = shs[active_dynamic_mask]
++        if colors_precomp is not None: colors_precomp = colors_precomp[active_dynamic_mask]
++        if opacity is not None: opacity = opacity[active_dynamic_mask]
++        if scales is not None: scales = scales[active_dynamic_mask]
++        if scales_t is not None: scales_t = scales_t[active_dynamic_mask]
++        if rotations is not None: rotations = rotations[active_dynamic_mask]
++        if rotations_r is not None: rotations_r = rotations_r[active_dynamic_mask]
++        if cov3D_precomp is not None: cov3D_precomp = cov3D_precomp[active_dynamic_mask]
++        if flow_2d is not None: flow_2d = flow_2d[active_dynamic_mask]
++        if marginal_t is not None: marginal_t = marginal_t[active_dynamic_mask]
++
+     # Prefilter
+     if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
+         mask = marginal_t[:,0] > 0.05
+@@ -196,10 +218,23 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+         rendered_image = rendered_image + (1 - alpha) * bg_color_from_envmap # * mask2[None]
+     
+     if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
+-        radii_all = radii.new_zeros(mask.shape)
+-        radii_all[mask] = radii
++        # 重构 radii 的形状，兼容 active_dynamic_mask
++        target_shape = active_dynamic_mask.shape if active_dynamic_mask is not None else mask.shape
++        radii_all = radii.new_zeros(target_shape)
++        
++        if active_dynamic_mask is not None:
++            # 只有活着的，并且过了 prefilter mask 的，才有 radius
++            active_radii = radii.new_zeros(active_dynamic_mask.sum())
++            active_radii[mask] = radii
++            radii_all[active_dynamic_mask] = active_radii
++        else:
++            radii_all[mask] = radii
+     else:
+-        radii_all = radii
++        if active_dynamic_mask is not None:
++            radii_all = radii.new_zeros(active_dynamic_mask.shape)
++            radii_all[active_dynamic_mask] = radii
++        else:
++            radii_all = radii
+ 
+     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+     # They will be excluded from value updates used in the splitting criteria.
+diff --git a/render.py b/render.py
+new file mode 100644
+index 0000000..a274287
+--- /dev/null
++++ b/render.py
+@@ -0,0 +1 @@
++# 统一渲染与3D漫游入口
+\ No newline at end of file
+diff --git a/scene/dataset.py b/scene/dataset.py
+new file mode 100644
+index 0000000..827e6d1
+--- /dev/null
++++ b/scene/dataset.py
+@@ -0,0 +1,209 @@
++# 新增懒加载机制的数据集类
++# 长序列按需懒加载机制（Lazy DataLoader）
++# 2-3分钟的长序列表演视频 -> 一次性读取几千帧的高清图片到 GPU -> 显存爆炸
++# 文件：scene/dataset.py
++import os
++import torch
++import torchvision
++from PIL import Image
++import json
++import numpy as np
++from scene.cameras import Camera
++from utils.graphics_utils import fov2focal, focal2fov
++
++class LazyCameraDataloader:
++    """
++    长序列动态视频的按需懒加载器 (Lazy DataLoader)
++    针对 SWinGS 和 HybridGS 设计，配合滑动窗口动态申请与释放显存，彻底避免 OOM
++    """
++    def __init__(self, dataset_path, args, resolution_scale=1.0):
++        self.dataset_path = dataset_path
++        self.args = args
++        self.resolution_scale = resolution_scale
++        
++        # 1. 仅加载轻量级的元数据 (Metadata)，绝对不加载图像张量
++        self.image_paths = []     # 存储所有帧的磁盘路径索引
++        self.cameras_meta = {}    # 存储相机内参、外参和时间戳等轻量级对象
++        self.loaded_images = {}   # 内存/显存中的活动图像字典 {frame_id: image_tensor}
++        
++        self.total_frames = 0
++        self._load_metadata()
++
++    def _load_metadata(self):
++        """
++        解析通过 MP4 -> PNG -> COLMAP 生成的 transforms_train.json 格式数据。
++        提取图像路径、外参矩阵(C2W)、内参(FOV)以及时间戳(Time)，放入内存中。
++        """
++        # 1. 确定 json 文件路径 (优先加载 train，也可以根据传参加载)
++        json_path = os.path.join(self.dataset_path, "transforms_train.json")
++        if not os.path.exists(json_path):
++            json_path = os.path.join(self.dataset_path, "transforms.json") # 备用路径
++            if not os.path.exists(json_path):
++                raise FileNotFoundError(f"在 {self.dataset_path} 目录下未找到 transforms_train.json 或 transforms.json！")
++        
++        print(f"[LazyLoader] 正在读取长序列元数据，路径: {json_path}")
++        
++        with open(json_path, 'r') as f:
++            meta = json.load(f)
++            
++        # 2. 提取全局或基础内参 (如果有的话)
++        # 多数脚本会在顶层写入 camera_angle_x
++        global_camera_angle_x = meta.get("camera_angle_x", None)
++        global_fl_x = meta.get("fl_x", None)
++        global_fl_y = meta.get("fl_y", None)
++        global_cx = meta.get("cx", None)
++        global_cy = meta.get("cy", None)
++        global_w = meta.get("w", None)
++        global_h = meta.get("h", None)
++
++        # 3. 提取所有帧并进行时间序列排序
++        frames = meta["frames"]
++        # 对于长序列表演视频，必须确保帧是按照时间严格顺序排列的
++        # 如果有 'time' 字段按 time 排，否则按文件名字符串排序
++        frames.sort(key=lambda x: x.get("time", x["file_path"]))
++        
++        for frame_id, frame in enumerate(frames):
++            # --- A. 解析并拼接图像绝对路径 ---
++            # json里的 file_path 通常是 "./images/00001" 或 "images/00001.png"
++            image_name = frame["file_path"]
++            
++            # 去除前导的 "./" 保证路径拼接正确
++            if image_name.startswith("./"):
++                image_name = image_name[2:]
++                
++            # 补充扩展名 (如果脚本生成的 json 中没有后缀)
++            if not (image_name.endswith(".png") or image_name.endswith(".jpg")):
++                image_name += ".png" 
++                
++            full_image_path = os.path.join(self.dataset_path, image_name)
++            self.image_paths.append(full_image_path)
++            
++            # --- B. 解析 4DGS 必需的时间戳 ---
++            # 归一化时间戳，通常在 [0, 1] 或 [-0.5, 0.5] 之间
++            timestamp = frame.get("time", 0.0) 
++            
++            # --- C. 解析外参矩阵 (C2W: Camera to World) ---
++            # json 中的 transform_matrix 默认是 C2W 矩阵
++            c2w = np.array(frame["transform_matrix"])
++            
++            # --- D. 解析逐帧的特定内参 (支持动态内参变焦相机) ---
++            camera_angle_x = frame.get("camera_angle_x", global_camera_angle_x)
++            fl_x = frame.get("fl_x", global_fl_x)
++            fl_y = frame.get("fl_y", global_fl_y)
++            cx = frame.get("cx", global_cx)
++            cy = frame.get("cy", global_cy)
++            w = frame.get("w", global_w)
++            h = frame.get("h", global_h)
++            
++            # 4. 将提取的轻量级元数据存入字典
++            self.cameras_meta[frame_id] = {
++                "c2w": c2w,
++                "timestamp": float(timestamp),
++                "camera_angle_x": camera_angle_x,
++                "fl_x": fl_x,
++                "fl_y": fl_y,
++                "cx": cx,
++                "cy": cy,
++                "w": w,
++                "h": h,
++                "image_name": os.path.basename(image_name)
++            }
++            
++        self.total_frames = len(self.image_paths)
++        print(f"[LazyLoader] 元数据加载成功！共解析出 {self.total_frames} 帧动态序列。")
++
++    def _read_image_to_tensor(self, frame_id):
++        """从磁盘异步读取单张图像并转换为 GPU 张量"""
++        if frame_id >= len(self.image_paths):
++            return None
++            
++        img_path = self.image_paths[frame_id]
++        image = Image.open(img_path).convert("RGB")
++        
++        # 降采样逻辑（如果开启了降采样）
++        if self.resolution_scale != 1.0:
++            new_size = (int(image.size[0] * self.resolution_scale), int(image.size[1] * self.resolution_scale))
++            image = image.resize(new_size, Image.Resampling.LANCZOS)
++            
++        # 转换为 C, H, W 张量并送入显存
++        transform = torchvision.transforms.ToTensor()
++        img_tensor = transform(image).cuda()
++        return img_tensor
++
++    def prefetch_window(self, start_frame: int, end_frame: int):
++        """
++        异步I/O预抓取：将当前滑动窗口 [start_frame, end_frame] 内的图像加载到显存
++        """
++        for frame_id in range(start_frame, min(end_frame + 1, self.total_frames)):
++            if frame_id not in self.loaded_images:
++                # 只有当图像不在显存时才执行高昂的磁盘 I/O 操作
++                self.loaded_images[frame_id] = self._read_image_to_tensor(frame_id)
++
++    def release_window(self, current_start_frame: int):
++        """
++        显存清理：释放已经滑出当前时间窗口的陈旧图像数据，死死压制显存峰值
++        """
++        frames_to_delete = []
++        for frame_id in self.loaded_images.keys():
++            if frame_id < current_start_frame:
++                frames_to_delete.append(frame_id)
++                
++        for frame_id in frames_to_delete:
++            # 从字典中删除引用
++            del self.loaded_images[frame_id]
++            
++        if len(frames_to_delete) > 0:
++            # 强制清空 CUDA 缓存，避免显存碎片化导致的中途崩溃
++            torch.cuda.empty_cache()
++
++    def get_camera_data(self, frame_id: int):
++        """
++        获取指定帧的相机对象与高清图像张量，供前向渲染与损失计算使用。
++        在此处将 JSON 中的 C2W 矩阵转换为渲染器需要的 W2C 和投影矩阵。
++        """
++        # 1. 触发懒加载，获取 GPU 张量图像
++        if frame_id not in self.loaded_images:
++            self.loaded_images[frame_id] = self._read_image_to_tensor(frame_id)
++            
++        image_tensor = self.loaded_images[frame_id]
++        meta = self.cameras_meta[frame_id]
++        
++        # 2. 从 meta 中恢复相机内参 (FOV)
++        if meta["camera_angle_x"] is not None:
++            fovx = meta["camera_angle_x"]
++            fovy = focal2fov(fov2focal(fovx, image_tensor.shape[2]), image_tensor.shape[1])
++        elif meta["fl_x"] is not None:
++            fovx = focal2fov(meta["fl_x"], image_tensor.shape[2])
++            fovy = focal2fov(meta["fl_y"], image_tensor.shape[1])
++        else:
++            raise ValueError("JSON 中既没有 camera_angle_x 也没有 focal length (fl_x/fl_y)！")
++            
++        # 3. 处理外参：原版 json 给的是 C2W (Camera to World)
++        # 3DGS 渲染器需要的是 R, T (World to Camera)
++        c2w = meta["c2w"]
++        # 对 NeRF 的 OpenGL 相机坐标系(Y上, Z后)转 COLMAP 坐标系(Y下, Z前)
++        c2w[:3, 1:3] *= -1 
++        
++        # 矩阵求逆得到 W2C
++        w2c = np.linalg.inv(c2w)
++        R = np.transpose(w2c[:3, :3])  # 3DGS 中的 R 是转置的 W2C 旋转矩阵
++        T = w2c[:3, 3]                 # W2C 平移向量
++        
++        # 4. 组装并返回标准的 Camera 对象
++        # 注意：这里的传参要和你原代码 `scene/cameras.py` 里的 Camera 类的 __init__ 对齐
++        cam = Camera(
++            colmap_id=frame_id, 
++            R=R, 
++            T=T, 
++            FoVx=fovx, 
++            FoVy=fovy, 
++            image=image_tensor, 
++            gt_alpha_mask=None,
++            image_name=meta["image_name"], 
++            uid=frame_id,
++            data_device="cuda",
++            timestamp=meta["timestamp"]  # <--- 4DGS 最核心的时间戳参数
++        )
++        
++        return cam
++    
+\ No newline at end of file
+diff --git a/scene/gaussian_model.py b/scene/gaussian_model.py
+index edf5996..6979a54 100644
+--- a/scene/gaussian_model.py
++++ b/scene/gaussian_model.py
+@@ -63,12 +63,20 @@ class GaussianModel:
+     def __init__(self, sh_degree : int, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, force_sh_3d: bool = False, sh_degree_t : int = 0):
+         self.active_sh_degree = 0
+         self.max_sh_degree = sh_degree  
++
++        # --- 原有 3D-4DGS 的基础属性 ---
+         self._xyz = torch.empty(0)
+         self._features_dc = torch.empty(0)
+         self._features_rest = torch.empty(0)
+         self._scaling = torch.empty(0)
+         self._rotation = torch.empty(0)
+         self._opacity = torch.empty(0)
++
++        # 4DGS 特有的时间属性
++        self._t = torch.empty(0)       # 时间中心
++        self._t_scaling = torch.empty(0) # 时间缩放
++
++        # ... 其他原有的优化器和超参数定义 ...
+         self.max_radii2D = torch.empty(0)
+         self.xyz_gradient_accum = torch.empty(0)
+         self.denom = torch.empty(0)
+@@ -100,7 +108,26 @@ class GaussianModel:
+         self.static_max_radii2D = torch.empty(0)
+         self.static_denom = torch.empty(0)
+         self.static_xyz_gradient_accum = torch.empty(0)
++
++        # ==========================================================
++        # 新增扩展 1：为 SWinGS 长序列时间解耦准备的生命周期属性
++        # ==========================================================
++        self._start_frame = torch.empty(0, dtype=torch.int32)
++        self._expire_frame = torch.empty(0, dtype=torch.int32)
+         
++        # ==========================================================
++        # 新增扩展 2：为 HybridGS 软硬约束准备的分类与追踪属性
++        # ==========================================================
++        # 动态/静态分类标识掩码: 
++        # 0 = 未分类 (初始状态)
++        # 1 = 绝对静止的背景 3D 高斯 (硬约束冻结)
++        # 2 = 前景 4D 高斯 (受软约束 L_reg_d 管理)
++        self._mask_dynamic = torch.empty(0, dtype=torch.int8)
++        
++        # 追踪属性：用于计算平均位移和最大瞬时位移
++        self._accumulated_displacement = torch.empty(0)
++        self._max_instantaneous_displacement = torch.empty(0)
++
+         self.setup_functions()
+ 
+     def capture(self):
+@@ -549,6 +576,14 @@ class GaussianModel:
+             if self.rot_4d:
+                 self._rotation_r = optimizable_tensors['rotation_r']
+             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
++        # ==============================================================================
++        # [必须新增的修复]：同步裁剪 SWinGS/HybridGS 的生命周期与分类掩码
++        # 作用：确保剪枝后，所有张量的第 0 维度长度绝对一致，防止渲染切片时崩溃！
++        # ==============================================================================
++        if hasattr(self, '_start_frame') and self._start_frame.numel() > 0:
++            self._start_frame = self._start_frame[valid_points_mask]
++            self._expire_frame = self._expire_frame[valid_points_mask]
++            self._mask_dynamic = self._mask_dynamic[valid_points_mask]
+ 
+     def prune_static_points(self, mask):
+         valid_points_mask = ~mask
+@@ -622,6 +657,23 @@ class GaussianModel:
+         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
++        # ==============================================================================
++        # [新增] HybridGS / SWinGS 扩展属性的致密化同步拼接
++        # 作用：确保克隆或分裂出的新高斯，继承正确的生命周期和分类掩码，防止张量维度崩溃
++        # ==============================================================================
++        if hasattr(self, '_start_frame') and self._start_frame.numel() > 0:
++            num_new_pts = new_xyz.shape[0]
++            
++            # 策略：新分裂/克隆出的点，生命周期继承当前的滑动窗口末尾（或者给一个默认值）
++            # 由于在底层模型中无法直接获取 trainer 的 window_end，这里赋予最安全的动态默认值
++            # 存活时间设为当前已有点的最大生命周期值，或者依靠后续滑动窗口的 alive_idx 更新来接管
++            default_start = torch.zeros(num_new_pts, dtype=torch.int32, device="cuda")
++            default_expire = torch.full((num_new_pts,), torch.max(self._expire_frame).item(), dtype=torch.int32, device="cuda")
++            default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda") # 默认为未分类的动态点
++            
++            self._start_frame = torch.cat([self._start_frame, default_start], dim=0)
++            self._expire_frame = torch.cat([self._expire_frame, default_expire], dim=0)
++            self._mask_dynamic = torch.cat([self._mask_dynamic, default_mask], dim=0)
+ 
+     def densification_postfix_static(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+         d = {"static_xyz": new_xyz,
+@@ -829,4 +881,23 @@ class GaussianModel:
+ 
+         self.prune_points(static_mask)
+ 
+-        self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+\ No newline at end of file
++        self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
++
++        # ==========================================================
++    
++    
++    # 以下为你需要添加到 GaussianModel 中的全新方法接口
++    # ==========================================================
++    # 提供统一的显存分配接口
++    def add_densification_stats(self):
++        # 扩展张量拼接逻辑
++        pass
++        
++    # 提供统一的梯度截断接口，用于 HybridGS 的硬约束降维
++    def convert_4d_to_3d(self, static_indices):
++        """将背景高斯永久固化为静态属性，截断时间属性梯度回传路径"""
++        with torch.no_grad():
++            self._mask_dynamic[static_indices] = 1 # 标记为绝对静止
++            # 抹除时间坐标和时间特征的梯度
++            self._t[static_indices].requires_grad_(False)
++            # 在此处实现具体的 4D -> 3D 张量降维操作
+\ No newline at end of file
+diff --git a/train.py b/train.py
+new file mode 100644
+index 0000000..4c61a8b
+--- /dev/null
++++ b/train.py
+@@ -0,0 +1,293 @@
++# 重构的统一执行入口
++
++#
++# Copyright (C) 2023, Inria
++# GRAPHDECO research group, https://team.inria.fr/graphdeco
++# All rights reserved.
++#
++# This software is free for non-commercial, research and evaluation use 
++# under the terms of the LICENSE.md file.
++#
++# For inquiries contact  george.drettakis@inria.fr
++#
++
++import os
++import random
++import torch
++from torch import nn
++from utils.loss_utils import l1_loss, ssim, msssim
++from gaussian_renderer import render
++import sys
++from scene import Scene, GaussianModel
++from utils.general_utils import safe_state, knn
++import uuid
++from tqdm import tqdm
++from utils.image_utils import psnr, easy_cmap
++from argparse import ArgumentParser, Namespace
++from arguments import ModelParams, PipelineParams, OptimizationParams
++from torchvision.utils import make_grid
++import numpy as np
++from omegaconf import OmegaConf
++from omegaconf.dictconfig import DictConfig
++from torch.utils.data import DataLoader
++
++from utils.mesh_utils import GaussianExtractor
++from utils.render_utils import generate_path, create_videos
++
++from utils.trainer_4dgs import Trainer4DGS
++from utils.trainer_swings import TrainerSWinGS
++from utils.trainer_hybrid import TrainerHybrid
++
++
++def trainer_factory(args, dataset, opt, pipe, testing_iterations, saving_iterations):
++    """工厂函数，根据参数动态实例化训练器"""
++    if args.model_type == 'baseline_4dgs':
++        return Trainer4DGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++    elif args.model_type == 'swings':
++        return TrainerSWinGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++    elif args.model_type == 'hybrid_gs':
++        return TrainerHybrid(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++    else:
++        raise ValueError(f"未知的模型类型: {args.model_type}")
++    
++try:
++    from torch.utils.tensorboard import SummaryWriter
++    TENSORBOARD_FOUND = True
++except ImportError:
++    TENSORBOARD_FOUND = False
++
++def validation(dataset, opt, pipe,checkpoint, gaussian_dim, time_duration, rot_4d, force_sh_3d,
++               num_pts, num_pts_ratio):
++    bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
++    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
++    
++    gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, 
++                              rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
++    
++    assert checkpoint, "No checkpoint provided for validation"
++    scene = Scene(dataset, gaussians, shuffle=False,num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
++    
++    (model_params, first_iter) = torch.load(checkpoint)
++    train_dir = os.path.join(dataset.model_path, 'train', "ours_{}".format(first_iter))
++    test_dir = os.path.join(dataset.model_path, 'test', "ours_{}".format(first_iter))
++    gaussians.restore(model_params, None)
++    gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)   
++    
++    #########   1. Validation and Rendering ############
++
++    print("export rendered testing images ...")
++    os.makedirs(test_dir, exist_ok=True)
++    gaussExtractor.reconstruction(scene.getTestCameras(),test_dir,stage = "validation")
++    gaussExtractor.export_image(test_dir,mode = "validation")
++
++    # #########    2. Render Trajectory       ############
++    
++    # print("rendering trajectory ...")
++    # traj_dir = os.path.join(test_dir, 'traj')
++    # os.makedirs(traj_dir, exist_ok=True)
++    # n_fames = 480
++    # cam_traj = generate_path(scene.getTrainCameras(), n_frames=n_fames)
++    # gaussExtractor.reconstruction(cam_traj, test_dir,stage = "trajectory")
++    # gaussExtractor.export_image(traj_dir,mode = "trajectory")
++    # create_videos( base_dir =traj_dir,
++    #                input_dir=traj_dir, 
++    #                out_name='render_traj', 
++    #                num_frames=n_fames)
++
++def prepare_output_and_logger(args):    
++    if not args.model_path:
++        if os.getenv('OAR_JOB_ID'):
++            unique_str=os.getenv('OAR_JOB_ID')
++        else:
++            unique_str = str(uuid.uuid4())
++        args.model_path = os.path.join("./output/", unique_str[0:10])
++        
++    # Set up output folder
++    print("Output folder: {}".format(args.model_path))
++    os.makedirs(args.model_path, exist_ok = True)
++    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
++        cfg_log_f.write(str(Namespace(**vars(args))))
++
++    # Create Tensorboard writer
++    tb_writer = None
++    if TENSORBOARD_FOUND:
++        tb_writer = SummaryWriter(args.model_path)
++    else:
++        print("Tensorboard not available: not logging progress")
++    return tb_writer
++
++def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
++    if tb_writer:
++        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
++        tb_writer.add_scalar('train_loss_patches/ssim_loss', Ll1.item(), iteration)
++        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
++        tb_writer.add_scalar('iter_time', elapsed, iteration)
++        tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
++        tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
++        if loss_dict is not None:
++            if "Lrigid" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/rigid_loss', loss_dict['Lrigid'].item(), iteration)
++            if "Ldepth" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/depth_loss', loss_dict['Ldepth'].item(), iteration)
++            if "Ltv" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/tv_loss', loss_dict['Ltv'].item(), iteration)
++            if "Lopa" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/opa_loss', loss_dict['Lopa'].item(), iteration)
++            if "Lptsopa" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/pts_opa_loss', loss_dict['Lptsopa'].item(), iteration)
++            if "Lsmooth" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/smooth_loss', loss_dict['Lsmooth'].item(), iteration)
++            if "Llaplacian" in loss_dict:
++                tb_writer.add_scalar('train_loss_patches/laplacian_loss', loss_dict['Llaplacian'].item(), iteration)
++
++
++        tb_writer.add_scalar('gpu/memory_allocated_MB', torch.cuda.memory_allocated() / 1e6, iteration)
++        tb_writer.add_scalar('gpu/memory_reserved_MB', torch.cuda.memory_reserved() / 1e6, iteration)
++
++    psnr_test_iter = 0.0
++    # Report test and samples of training set
++    if iteration in testing_iterations:
++        validation_configs = ({'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]},
++                              {'name': 'test', 'cameras' : [scene.getTestCameras()[idx] for idx in range(len(scene.getTestCameras()))]})
++
++        for config in validation_configs:
++            if config['cameras'] and len(config['cameras']) > 0:
++                l1_test = 0.0
++                psnr_test = 0.0
++                ssim_test = 0.0
++                msssim_test = 0.0
++                for idx, batch_data in enumerate(tqdm(config['cameras'])):
++                    gt_image, viewpoint = batch_data
++                    gt_image = gt_image.cuda()
++                    viewpoint = viewpoint.cuda()
++                    
++                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
++                    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
++                    
++                    depth = easy_cmap(render_pkg['depth'][0])
++                    alpha = torch.clamp(render_pkg['alpha'], 0.0, 1.0).repeat(3,1,1)
++                    image_4d = torch.clamp(render_pkg["render_4d"], 0.0, 1.0)
++                    image_3d = torch.clamp(render_pkg["render_3d"], 0.0, 1.0)
++
++                    if tb_writer and (idx < 5):
++                        grid = [gt_image, image, image_4d, image_3d]
++                        grid = make_grid(grid, nrow=2)
++                        tb_writer.add_images(config['name'] + "_view_{}/gt_vs_render".format(viewpoint.image_name), grid[None], global_step=iteration)
++                            
++                    l1_test += l1_loss(image, gt_image).mean().double()
++                    psnr_test += psnr(image, gt_image).mean().double()
++                    ssim_test += ssim(image, gt_image).mean().double()
++                    msssim_test += msssim(image[None].cpu(), gt_image[None].cpu())
++                psnr_test /= len(config['cameras'])
++                l1_test /= len(config['cameras']) 
++                ssim_test /= len(config['cameras'])     
++                msssim_test /= len(config['cameras'])        
++                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
++                if tb_writer:
++                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
++                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
++                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
++                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - msssim', msssim_test, iteration)
++                if config['name'] == 'test':
++                    psnr_test_iter = psnr_test.item()
++                    
++    torch.cuda.empty_cache()
++    return psnr_test_iter
++
++
++def setup_seed(seed):
++     torch.manual_seed(seed)
++     torch.cuda.manual_seed_all(seed)
++     np.random.seed(seed)
++     random.seed(seed)
++     torch.backends.cudnn.deterministic = True
++
++if __name__ == "__main__":
++    # Set up command line argument parser
++    parser = ArgumentParser(description="混合3D与4D高斯场景重建统一训练框架")
++    lp = ModelParams(parser)
++    op = OptimizationParams(parser)
++    pp = PipelineParams(parser)
++    # 新增模型路由参数
++    parser.add_argument("--model_type", type=str, default="hybrid_gs", 
++                        choices=["baseline_4dgs", "swings", "hybrid_gs"], 
++                        help="选择要训练的模型基线")
++    # 预留给 SWinGS 和 HybridGS 的超参数 -> config.yaml文件中若对应项没有被注释，则优先使用config
++    parser.add_argument("--swin_size", type=int, default=50, help="滑动窗口长度")
++    parser.add_argument("--tau_avg", type=float, default=0.01, help="硬约束平均位移阈值")
++    parser.add_argument("--tau_max", type=float, default=0.05, help="硬约束最大瞬时位移阈值")
++    parser.add_argument("--lambda_d", type=float, default=0.1, help="位移收敛软约束惩罚系数")
++
++    parser.add_argument("--config", type=str)
++    parser.add_argument('--debug_from', type=int, default=-1)
++    parser.add_argument('--detect_anomaly', action='store_true', default=False)
++    parser.add_argument("--test_iterations", nargs="+", type=int, default=[6_000])
++    parser.add_argument("--save_iterations", nargs="+", type=int, default=[6_000])
++    parser.add_argument("--quiet", action="store_true")
++    parser.add_argument("--start_checkpoint", type=str, default = None)
++    
++    parser.add_argument("--gaussian_dim", type=int, default=3)
++    parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
++    parser.add_argument('--num_pts', type=int, default=100_000)
++    parser.add_argument('--num_pts_ratio', type=float, default=1.0)
++    parser.add_argument("--rot_4d", action="store_true")
++    parser.add_argument("--force_sh_3d", action="store_true")
++    parser.add_argument("--batch_size", type=int, default=1)
++    parser.add_argument("--seed", type=int, default=6666)
++    parser.add_argument("--exhaust_test", action="store_true")
++    parser.add_argument("--val", action="store_true", default=False)
++    
++    args = parser.parse_args(sys.argv[1:])
++    args.save_iterations.append(args.iterations)
++        
++    cfg = OmegaConf.load(args.config)
++
++    def recursive_merge(key, host):
++        if isinstance(host[key], DictConfig):
++            for key1 in host[key].keys():
++                recursive_merge(key1, host[key])
++        else:
++            assert hasattr(args, key), key
++            setattr(args, key, host[key])
++    
++    for k in cfg.keys():
++        recursive_merge(k, cfg)
++        
++    if args.exhaust_test:
++        args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations,500)]
++    
++    # 系统状态初始化
++    setup_seed(args.seed)
++    
++    print("Optimizing " + args.model_path)
++
++    # Initialize system state (RNG)
++    safe_state(args.quiet)
++    torch.autograd.set_detect_anomaly(args.detect_anomaly)
++
++    # ---------------------------------------------------------
++    # 核心路由：使用 OOP 框架替代原有的 training() 
++    # ---------------------------------------------------------
++    if args.val == False:
++        print(f"\n[系统通知] 正在启动训练管线，当前选择的模型架构为: {args.model_type.upper()}")
++        # training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
++        #         args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size)
++        # 将原有的 lp.extract(args) 提取出来，传入工厂函数
++        trainer = trainer_factory(
++            args=args, 
++            dataset=lp.extract(args), 
++            opt=op.extract(args), 
++            pipe=pp.extract(args), 
++            testing_iterations=args.test_iterations, 
++            saving_iterations=args.save_iterations
++        )
++        # 启动统一的训练循环
++        trainer.train()
++    else:
++        # 验证模式保持不变
++        print("\n[系统通知] 启动验证模式 (Validation)...")
++        validation(lp.extract(args), op.extract(args), pp.extract(args),args.start_checkpoint,args.gaussian_dim, 
++                   args.time_duration,args.rot_4d, args.force_sh_3d, args.num_pts, args.num_pts_ratio)
++        
++
++    print("\nComplete.")
+diff --git a/train.sh b/train.sh
+index 3a04417..4a8de08 100644
+--- a/train.sh
++++ b/train.sh
+@@ -6,6 +6,7 @@ for data in ${dataset[@]};
+ do
+     model_path=output/${data}
+     source_path=<your_dataset_path>/${data}
++    # 在yaml配置文件中恢复了model_path和source_path的默认值，因此这里不需要再传入参数了。
+     CUDA_VISIBLE_DEVICES=${device} python main.py --config configs/${config}/default.yaml  --model_path $model_path \
+     --source_path $source_path 
+     
+diff --git a/ui_main.py b/ui_main.py
+new file mode 100644
+index 0000000..8dea585
+--- /dev/null
++++ b/ui_main.py
+@@ -0,0 +1,20 @@
++# 预留的可视化集成入口
++
++class HybridGSMainWindow:
++    """整合训练配置、实时图表与3D漫游的图形用户界面"""
++    
++    def init_control_panel(self):
++        """构建控制台：动态下发 swin_size, num_gs, tau_avg 等超参数"""
++        pass
++
++    def init_monitor_panel(self):
++        """构建监控看板：通过 QThread 异步监听 MetricsTracker 推送的数据流并绘图"""
++        pass
++
++    def init_viewer_panel(self):
++        """构建 OpenGL/WebGL 交互视窗：绑定鼠标键盘事件，实现自由视点漫游"""
++        pass
++
++    def start_training_thread(self, model_type: str):
++        """拉起后台守护进程执行具体模型的训练逻辑"""
++        pass
+\ No newline at end of file
+diff --git a/utils/metrics_tracker.py b/utils/metrics_tracker.py
+new file mode 100644
+index 0000000..8483598
+--- /dev/null
++++ b/utils/metrics_tracker.py
+@@ -0,0 +1,90 @@
++# 文件：utils/metrics_tracker.py
++import torch
++import time
++import json
++
++class MetricsTracker:
++    _instance = None
++    
++    def __new__(cls):
++        if cls._instance is None:
++            cls._instance = super(MetricsTracker, cls).__new__(cls)
++            cls._instance.metrics_log = {
++                # --- 独立双时间轴 ---
++                "train_iterations": [],    # 对应高频记录的训练指标 (如每100步)
++                "test_iterations": [],     # 对应低频记录的测试指标 (如7000, 30000步)
++                
++                # --- 空间与时间质量指标 (挂载于 test_iterations) ---
++                "psnr": [],
++                "ssim": [],
++                "lpips": [],
++                "fps": [],                 # 渲染评估时的平均 FPS
++                "temporal_psnr": [],       # 记录时间一致性/抗闪烁度 (T-PSNR)
++                
++                # --- 效率与状态指标 (挂载于 train_iterations) ---
++                "vram_peak_mb": [],        # 捕捉VRAM消耗
++                "training_time_s": [],     # 记录训练耗时，证明 HybridGS 更快
++                "num_3d_gaussians": [],    # 记录被硬约束冻结的静态高斯数量
++                "num_4d_gaussians": [],    # 记录活跃的动态前景高斯数量
++            }
++            cls._instance.start_time = None
++        return cls._instance
++
++    def start_timer(self):
++        """记录训练开始的绝对时间"""
++        self.start_time = time.time()
++        
++    def record_training_stats(self, iteration, num_3d, num_4d):
++        """
++        统一记录所有高频训练状态指标，确保数组长度绝对一致！
++        供论文中证明：背景转化为3D高斯，4D高斯数量维持低位，且时间/显存下降。
++        """
++        self.metrics_log["train_iterations"].append(iteration)
++        
++        # 记录时间
++        elapsed = time.time() - self.start_time if self.start_time else 0
++        self.metrics_log["training_time_s"].append(elapsed)
++        
++        # 记录高斯数量
++        self.metrics_log["num_3d_gaussians"].append(num_3d)
++        self.metrics_log["num_4d_gaussians"].append(num_4d)
++        
++        # 记录显存
++        vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
++        self.metrics_log["vram_peak_mb"].append(vram_mb)
++
++    def record_eval_metrics(self, iteration, avg_psnr, avg_ssim, avg_fps):
++        """统一记录测试集评估指标"""
++        self.metrics_log["test_iterations"].append(iteration)
++        self.metrics_log["psnr"].append(avg_psnr)
++        self.metrics_log["ssim"].append(avg_ssim)
++        self.metrics_log["fps"].append(avg_fps)
++        
++    def measure_fps(self, render_func, *args, **kwargs):
++        """利用CUDA底层事件同步机制包裹渲染核心函数，获取极致精准的渲染耗时"""
++        start_event = torch.cuda.Event(enable_timing=True)
++        end_event = torch.cuda.Event(enable_timing=True)
++        
++        start_event.record()
++        out = render_func(*args, **kwargs)
++        end_event.record()
++        torch.cuda.synchronize()
++        
++        elapsed_time_ms = start_event.elapsed_time(end_event)
++        fps = 1000.0 / elapsed_time_ms if elapsed_time_ms > 0 else 0
++        
++        # 注意：这里不再单独 append fps，直接返回交给 evaluate 函数计算平均值
++        return out, fps
++        
++    def calculate_image_metrics(self, gt_image, rendered_image):
++        """自动计算空间域指标：PSNR、SSIM与LPIPS"""
++        pass
++
++    def calculate_temporal_metrics(self, rendered_seq, gt_seq):
++        """计算时间域指标：Temporal PSNR / Flickering Metric"""
++        pass
++        
++    def save_log(self, filepath):
++        """将追踪数据实时序列化至JSON格式日志文件"""
++        with open(filepath, 'w') as f:
++            json.dump(self.metrics_log, f, indent=4)
+\ No newline at end of file
+diff --git a/utils/trainer_4dgs.py b/utils/trainer_4dgs.py
+new file mode 100644
+index 0000000..a1bf528
+--- /dev/null
++++ b/utils/trainer_4dgs.py
+@@ -0,0 +1,279 @@
++# 3D4DGS模型封装类
++# 文件：utils/trainer_4dgs.py
++import os
++import torch
++import random
++from torch import nn
++from random import randint
++from tqdm import tqdm
++from utils.loss_utils import l1_loss, ssim
++from utils.image_utils import psnr # 确保导入了 psnr
++from gaussian_renderer import render
++from scene.gaussian_model import GaussianModel
++from utils.general_utils import knn
++from utils.trainer_base import BaseTrainer
++
++class Trainer4DGS(BaseTrainer):
++    """
++    原生 3D-4DGS 完整版封装 (Baseline)
++    包含环境贴图优化、多重正则化损失(Rigid/Motion)、梯度累加机制，
++    并完整接入了 Lazy DataLoader 与全方位评估追踪。
++    """
++    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
++        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++        
++        # 1. 修正时间维度缩放
++        if hasattr(self.dataset, 'frame_ratio') and self.dataset.frame_ratio > 1:
++            self.args.time_duration = [self.args.time_duration[0] / self.dataset.frame_ratio, 
++                                       self.args.time_duration[1] / self.dataset.frame_ratio]
++            
++        # 2. 初始化 GaussianModel
++        self.gaussians = GaussianModel(
++            dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3, 
++            gaussian_dim=self.args.gaussian_dim, 
++            time_duration=self.args.time_duration, 
++            rot_4d=self.args.rot_4d, 
++            force_sh_3d=self.args.force_sh_3d, 
++            sh_degree_t=2 if self.pipe.eval_shfs_4d else 0
++        )
++        self.gaussians.training_setup(self.opt)
++        
++        # 3. 恢复 Checkpoint
++        self.first_iter = 0
++        if self.args.start_checkpoint:
++            (model_params, first_iter) = torch.load(self.args.start_checkpoint)
++            self.gaussians.restore(model_params, self.opt)
++            self.first_iter = first_iter
++
++        # 4. 背景颜色
++        bg_color = [1, 1, 1] if hasattr(self.dataset, 'white_background') and self.dataset.white_background else [0, 0, 0]
++        self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
++        
++        # 5. 环境光贴图优化
++        if self.pipe.env_map_res:
++            self.env_map = nn.Parameter(torch.zeros((3, self.pipe.env_map_res, self.pipe.env_map_res), dtype=torch.float, device="cuda").requires_grad_(True))
++            self.env_map_optimizer = torch.optim.Adam([self.env_map], lr=self.opt.feature_lr, eps=1e-15)
++        else:
++            self.env_map = None
++            self.env_map_optimizer = None
++        self.gaussians.env_map = self.env_map
++
++    @torch.no_grad()
++    def evaluate(self, iteration):
++        """
++        在特定的 iteration 执行测试集评估，并将 PSNR、SSIM 和 FPS 记入 Tracker。
++        使用 @torch.no_grad() 是为了在评估时不计算梯度，节省显存并提速。
++        """
++        print(f"\n[评估] 正在执行 Iteration {iteration} 的测试集评估...")
++        
++        test_cameras = self.dataset.getTestCameras() if hasattr(self.dataset, 'getTestCameras') else []
++        if not test_cameras:
++            print("[警告] 未找到测试集相机，跳过评估。")
++            return
++            
++        total_psnr = 0.0
++        total_ssim = 0.0
++        total_fps = 0.0
++        
++        for viewpoint_cam in tqdm(test_cameras, desc="Testing"):
++            gt_image = viewpoint_cam.original_image.cuda()
++            
++            # 使用 MetricsTracker 包装以获取精准渲染耗时
++            render_pkg, fps = self.metrics_tracker.measure_fps(
++                render, 
++                viewpoint_camera=viewpoint_cam, 
++                pc=self.gaussians, 
++                pipe=self.pipe, 
++                bg_color=self.background, 
++                active_dynamic_mask=None
++            )
++            
++            image = torch.clamp(render_pkg["render"], 0.0, 1.0)
++            
++            # 累计指标
++            total_psnr += psnr(image, gt_image).mean().item()
++            total_ssim += ssim(image, gt_image).mean().item()
++            total_fps += fps
++            
++        avg_psnr = total_psnr / len(test_cameras)
++        avg_ssim = total_ssim / len(test_cameras)
++        avg_fps = total_fps / len(test_cameras)
++        
++        # 将测试结果记录到 MetricsTracker 的字典中
++        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
++        
++        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
++
++    def train(self):
++        """完整复刻原版 3D-4DGS 的训练大循环，接入 Lazy DataLoader 与全面评估"""
++        print(f"\n[Trainer4DGS] 开始训练 Baseline，总迭代次数: {self.opt.iterations}")
++        self.metrics_tracker.start_timer()
++        
++        iter_start = torch.cuda.Event(enable_timing=True)
++        iter_end = torch.cuda.Event(enable_timing=True)
++        
++        progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="Training progress")
++        total_frames = self.dataset.total_frames
++        
++        for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
++            iter_start.record()
++            self.gaussians.update_learning_rate(iteration)
++            
++            if iteration % self.opt.sh_increase_interval == 0:
++                self.gaussians.oneupSHdegree()
++                
++            if (iteration - 1) == self.args.debug_from:
++                self.pipe.debug = True
++                
++            batch_size = self.args.batch_size
++            batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
++            batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
++            
++            loss = 0
++            # =============== 批处理循环 ===============
++            for batch_idx in range(batch_size):
++                # Lazy DataLoader：随机选取一帧
++                frame_id = randint(0, total_frames - 1)
++                viewpoint_cam = self.dataset.get_camera_data(frame_id)
++                gt_image = viewpoint_cam.original_image.cuda()
++                
++                # 前向渲染
++                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=None)
++                image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
++                alpha = render_pkg["alpha"]
++                
++                viewspace_point_tensor_static = render_pkg.get("viewspace_points_static", [])
++                visibility_filter_static = render_pkg.get("visibility_filter_static", [])
++                radii_static = render_pkg.get("radii_static", [])
++
++                # 基础光度损失
++                Ll1 = l1_loss(image, gt_image)
++                Lssim = 1.0 - ssim(image, gt_image)
++                current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
++                
++                # Opa Mask Loss
++                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
++                    o = alpha.clamp(1e-6, 1-1e-6)
++                    sky = 1 - viewpoint_cam.gt_alpha_mask
++                    Lopa_mask = (- sky * torch.log(1 - o)).mean()
++                    current_loss += self.opt.lambda_opa_mask * Lopa_mask
++                    
++                # Rigid Loss (刚性正则化)
++                if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
++                    k = 20
++                    xyz_cur = self.gaussians.get_xyz
++                    idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
++                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
++                    weight = torch.exp(-100 * dist)
++                    vel_dist = torch.norm(velocity[idx] - velocity[None, :, None], p=2, dim=-1)
++                    Lrigid = (weight * vel_dist).sum() / k / xyz_cur.shape[0]
++                    current_loss += self.opt.lambda_rigid * Lrigid
++                    
++                # Motion Loss (运动正则化)
++                if hasattr(self.opt, 'lambda_motion') and self.opt.lambda_motion > 0:
++                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
++                    Lmotion = velocity.norm(p=2, dim=1).mean()
++                    current_loss += self.opt.lambda_motion * Lmotion
++
++                current_loss = current_loss / batch_size
++                current_loss.backward()
++                loss += current_loss.item()
++                
++                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
++                batch_radii.append(radii)
++                batch_visibility_filter.append(visibility_filter)
++
++                static = len(viewspace_point_tensor_static) > 0
++                if static:
++                    batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
++                    batch_radii_static.append(radii_static)
++                    batch_visibility_filter_static.append(visibility_filter_static)
++
++            # =============== 梯度累加逻辑 ===============
++            if batch_size > 1:
++                visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
++                visibility_filter = visibility_count > 0
++                radii = torch.stack(batch_radii, 1).max(1)[0]
++                batch_viewspace_point_grad = torch.stack(batch_point_grad, 1).sum(1)
++                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
++                
++                if static:
++                    visibility_count_static = torch.stack(batch_visibility_filter_static, 1).sum(1)
++                    visibility_filter_static = visibility_count_static > 0
++                    radii_static = torch.stack(batch_radii_static, 1).max(1)[0]
++                    batch_viewspace_point_grad_static = torch.stack(batch_point_grad_static, 1).sum(1)
++                    batch_viewspace_point_grad_static[visibility_filter_static] = batch_viewspace_point_grad_static[visibility_filter_static] * batch_size / visibility_count_static[visibility_filter_static]
++                    batch_viewspace_point_grad_static = batch_viewspace_point_grad_static.unsqueeze(1)
++                
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
++                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                    batch_t_grad = batch_t_grad.unsqueeze(1)
++            else:
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone().detach()
++                    
++            iter_end.record()
++
++            # =============== 致密化与剪枝 ===============
++            with torch.no_grad():
++                # [核心指标追踪]：显存、耗时、3D/4D高斯数量
++                if iteration % 100 == 0:
++                    num_4d = self.gaussians.get_xyz.shape[0]
++                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
++                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
++                    
++                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
++                    self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
++                    if static:
++                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
++                    
++                    if batch_size == 1:
++                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                    else:
++                        self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                        if static:
++                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
++
++                    if iteration > self.opt.densify_from_iter:
++                        size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
++                        if iteration % self.opt.densification_interval == 0:
++                            extent = getattr(self.dataset, 'cameras_extent', 1.0)
++                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, extent, size_threshold, self.opt.densify_grad_t_threshold)
++                            if hasattr(self.gaussians, 'dynamic2static'):
++                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
++                                
++                    if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
++                        self.gaussians.reset_opacity()
++
++                # =============== 优化器步进 ===============
++                if iteration < self.opt.iterations:
++                    self.gaussians.optimizer.step()
++                    self.gaussians.optimizer.zero_grad(set_to_none=True)
++                    if self.env_map_optimizer and iteration < self.pipe.env_optimize_until:
++                        self.env_map_optimizer.step()
++                        self.env_map_optimizer.zero_grad(set_to_none=True)
++
++                # =============== 进度与评估 ===============
++                if iteration % 10 == 0:
++                    postfix = {"Loss": f"{loss:.4f}", "Pts": self.gaussians.get_xyz.shape[0]}
++                    if static: postfix["Static"] = self.gaussians.get_static_xyz.shape[0]
++                    progress_bar.set_postfix(postfix)
++                    progress_bar.update(10)
++                
++                # [触发测试集评估]
++                if iteration in self.testing_iterations:
++                    self.evaluate(iteration)
++                    
++                if iteration in self.saving_iterations:
++                    print(f"\n[Trainer4DGS] 正在保存模型至 Iteration {iteration}")
++                    os.makedirs(self.args.model_path, exist_ok=True)
++                    torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
++
++        progress_bar.close()
++        
++        # 保存最终追踪日志
++        log_path = os.path.join(self.args.model_path, "baseline_metrics.json")
++        self.metrics_tracker.save_log(log_path)
++        print(f"[Trainer4DGS] 训练完成！指标已保存至 {log_path}")
+\ No newline at end of file
+diff --git a/utils/trainer_base.py b/utils/trainer_base.py
+new file mode 100644
+index 0000000..57e6edf
+--- /dev/null
++++ b/utils/trainer_base.py
+@@ -0,0 +1,30 @@
++import torch
++from utils.metrics_tracker import MetricsTracker
++
++class BaseTrainer:
++    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
++        self.dataset = dataset
++        self.opt = opt
++        self.pipe = pipe
++        self.testing_iterations = testing_iterations
++        self.saving_iterations = saving_iterations
++        self.args = args
++        
++        # 实例化统一的单例监控记录仪
++        self.metrics_tracker = MetricsTracker()
++        
++        # 初始化高斯模型（稍后在 gaussian_model.py 中重构）
++        # self.gaussians = GaussianModel(...)
++
++    def train(self):
++        """定义训练循环骨架，子类必须实现特定步骤"""
++        raise NotImplementedError("子类必须实现具体的训练循环")
++        
++    def evaluate(self, iteration):
++        """统一的评估管线"""
++        # 调用 MetricsTracker 计算 PSNR, SSIM, LPIPS 并捕捉 VRAM 消耗
++        pass
++        
++    def save_model(self, iteration):
++        """统一的模型序列化保存管线"""
++        pass
+\ No newline at end of file
+diff --git a/utils/trainer_hybrid.py b/utils/trainer_hybrid.py
+new file mode 100644
+index 0000000..4a70f96
+--- /dev/null
++++ b/utils/trainer_hybrid.py
+@@ -0,0 +1,266 @@
++# My HybridGS Trainer
++# 文件：utils/trainer_hybrid.py
++import os
++import torch
++from tqdm import tqdm
++from random import randint
++from utils.loss_utils import l1_loss, ssim
++from gaussian_renderer import render
++from utils.trainer_swings import TrainerSWinGS
++from utils.general_utils import knn
++
++class TrainerHybrid(TrainerSWinGS):
++    """
++    核心创新模型：HybridGS
++    结合空间解耦（硬约束）与时间解耦（软约束）的混合 3D-4D 高斯表示。
++    """
++    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
++        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++        
++        # 接收并初始化外部传进来的超参数 (需确保 args 中有这些参数)
++        self.tau_avg = getattr(args, 'tau_avg', 0.01)       # 硬约束：平均位移阈值
++        self.tau_max = getattr(args, 'tau_max', 0.05)       # 硬约束：最大瞬时位移阈值
++        self.lambda_d = getattr(args, 'lambda_d', 0.1)      # 软约束：位移收敛惩罚系数
++
++    def robust_hard_constraint_classifier(self):
++        """
++        核心机制 1：鲁棒硬约束判定 (空间解耦)
++        将绝对静止的舞台背景永久冻结放入全局背景显存池。
++        执行双重阈值联合判定逻辑 (R_avg < tau_avg AND R_max < tau_max)。
++        """
++        with torch.no_grad():
++            # 1. 提取当前仍然是动态的高斯 (mask_dynamic == 0 未分类, 或 2 动态)
++            dynamic_mask = self.gaussians._mask_dynamic != 1
++            if not dynamic_mask.any():
++                return
++            
++            # 2. 获取动态高斯在当前时刻 t 的速度 (位移特征)
++            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t)
++            
++            # 3. 在极小的时间偏移后采样，模拟瞬时位移变化
++            _, vel_next = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.05)
++            
++            # 计算位移的模长 (Norm)
++            displacement_1 = velocity[dynamic_mask].norm(dim=-1)
++            displacement_2 = vel_next[dynamic_mask].norm(dim=-1)
++            
++            # 4. 计算 R_avg (平均位移) 和 R_max (最大瞬时位移)
++            r_avg = (displacement_1 + displacement_2) / 2.0
++            r_max = torch.max(displacement_1, displacement_2)
++            
++            # 5. 双重阈值联合判定
++            is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
++            
++            if is_static.any():
++                # 找到满足静止条件的全局索引
++                global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
++                
++                # [核心斩断逻辑]：永久冻结为 3D 静态背景 (mask = 1)
++                self.gaussians._mask_dynamic[global_static_indices] = 1
++                
++                # 截断时间属性的梯度回传，物理上将其降维为 3D 高斯
++                if self.gaussians._t.requires_grad:
++                    self.gaussians._t[global_static_indices].requires_grad_(False)
++                if hasattr(self.gaussians, '_scaling_t') and self.gaussians._scaling_t.requires_grad:
++                    self.gaussians._scaling_t[global_static_indices].requires_grad_(False)
++
++    def train(self):
++        """重写训练大循环，全面注入软硬约束"""
++        print(f"\n[TrainerHybrid] 开始训练！核心机制已激活：")
++        print(f" --> 软约束 L_reg_d (lambda_d={self.lambda_d})")
++        print(f" --> 硬约束双判定 (tau_avg={self.tau_avg}, tau_max={self.tau_max})")
++        self.metrics_tracker.start_timer()
++
++        # 初始化生命周期张量 (继承自 SWinGS 的逻辑)
++        if self.gaussians._start_frame.numel() == 0:
++            num_pts = self.gaussians.get_xyz.shape[0]
++            self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
++            self.gaussians._expire_frame = torch.full((num_pts,), self.window_end, dtype=torch.int32, device="cuda")
++            self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
++
++        # 预加载初始时间窗口的图片
++        self.dataset.prefetch_window(self.window_start, self.window_end)
++        
++        iter_start = torch.cuda.Event(enable_timing=True)
++        iter_end = torch.cuda.Event(enable_timing=True)
++        progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="HybridGS Training")
++        
++        for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
++            iter_start.record()
++            
++            # 1. 更新滑动窗口与学习率
++            self._update_sliding_window(iteration)
++            self.gaussians.update_learning_rate(iteration)
++            
++            if iteration % self.opt.sh_increase_interval == 0:
++                self.gaussians.oneupSHdegree()
++            if (iteration - 1) == self.args.debug_from:
++                self.pipe.debug = True
++
++            batch_size = self.args.batch_size
++            batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
++            batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
++            
++            loss = 0
++            # =============== 批处理循环 ===============
++            for batch_idx in range(batch_size):
++                # 从当前滑动窗口中随机抽帧
++                frame_id = randint(self.window_start, self.window_end)
++                viewpoint_cam = self.dataset.get_camera_data(frame_id)
++                gt_image = viewpoint_cam.original_image.cuda()
++                
++                # 获取混合掩码 (包含 3D静态背景 + 当前存活的4D高斯)
++                active_mask = self._get_active_dynamic_mask(frame_id)
++                
++                # 前向渲染
++                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
++                image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
++                alpha = render_pkg["alpha"]
++                
++                viewspace_point_tensor_static = render_pkg.get("viewspace_points_static", [])
++                visibility_filter_static = render_pkg.get("visibility_filter_static", [])
++                radii_static = render_pkg.get("radii_static", [])
++
++                # --- 计算基础光度损失 ---
++                Ll1 = l1_loss(image, gt_image)
++                Lssim = 1.0 - ssim(image, gt_image)
++                current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
++                
++                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
++                    o = alpha.clamp(1e-6, 1-1e-6)
++                    sky = 1 - viewpoint_cam.gt_alpha_mask
++                    current_loss += self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
++                    
++                # ==========================================================
++                # 核心机制 2：软约束 L_reg_d (时间位移正则化，解决闪烁)
++                # ==========================================================
++                _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t)
++                # 仅对当前出场的高斯施加软约束惩罚
++                active_velocity = velocity[active_mask] if active_mask is not None else velocity
++                
++                # 植入位移收敛正则化项
++                l_reg_d = self.lambda_d * active_velocity.norm(p=2, dim=1).mean()
++                current_loss += l_reg_d  
++                
++                # --- 保留原版的刚性约束 (Rigid Loss) ---
++                if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
++                    num_active = active_mask.sum().item() if active_mask is not None else self.gaussians.get_xyz.shape[0]
++                    k = min(20, num_active - 1)
++                    if k > 0:
++                        xyz_cur = self.gaussians.get_xyz[active_mask] if active_mask is not None else self.gaussians.get_xyz
++                        idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
++                        weight = torch.exp(-100 * dist)
++                        vel_dist = torch.norm(active_velocity[idx] - active_velocity[None, :, None], p=2, dim=-1)
++                        current_loss += self.opt.lambda_rigid * ((weight * vel_dist).sum() / k / num_active)
++
++                current_loss = current_loss / batch_size
++                current_loss.backward()
++                loss += current_loss.item()
++                
++                # 收集梯度数据供致密化使用
++                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
++                batch_radii.append(radii)
++                batch_visibility_filter.append(visibility_filter)
++
++                static = len(viewspace_point_tensor_static) > 0
++                if static:
++                    batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
++                    batch_radii_static.append(radii_static)
++                    batch_visibility_filter_static.append(visibility_filter_static)
++
++            # =============== 梯度累加逻辑 ===============
++            if batch_size > 1:
++                visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
++                visibility_filter = visibility_count > 0
++                radii = torch.stack(batch_radii, 1).max(1)[0]
++                batch_viewspace_point_grad = torch.stack(batch_point_grad, 1).sum(1)
++                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
++                
++                if static:
++                    visibility_count_static = torch.stack(batch_visibility_filter_static, 1).sum(1)
++                    visibility_filter_static = visibility_count_static > 0
++                    radii_static = torch.stack(batch_radii_static, 1).max(1)[0]
++                    batch_viewspace_point_grad_static = torch.stack(batch_point_grad_static, 1).sum(1)
++                    batch_viewspace_point_grad_static[visibility_filter_static] = batch_viewspace_point_grad_static[visibility_filter_static] * batch_size / visibility_count_static[visibility_filter_static]
++                    batch_viewspace_point_grad_static = batch_viewspace_point_grad_static.unsqueeze(1)
++                
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
++                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                    batch_t_grad = batch_t_grad.unsqueeze(1)
++            else:
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone().detach()
++                    
++            iter_end.record()
++
++            # =============== 致密化、硬约束与指标记录 ===============
++            with torch.no_grad():
++                # [核心机制触发] 定期执行硬约束判定，淘汰背景空间冗余
++                # 放在 densify_from_iter 之后，让高斯先发育一段时间再判定
++                if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
++                    self.robust_hard_constraint_classifier()
++            
++                if iteration % 100 == 0:
++                    # 分别计算记录硬约束生效后的纯3D点，和依然存活的4D点
++                    num_3d = (self.gaussians._mask_dynamic == 1).sum().item()
++                    num_4d = (self.gaussians._mask_dynamic != 1).sum().item()
++                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
++                    
++                # 原版的克隆、分裂与剪枝逻辑
++                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
++                    self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
++                    if static:
++                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
++                    
++                    if batch_size == 1:
++                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                    else:
++                        self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                        if static:
++                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
++
++                    if iteration > self.opt.densify_from_iter:
++                        size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
++                        if iteration % self.opt.densification_interval == 0:
++                            extent = getattr(self.dataset, 'cameras_extent', 1.0)
++                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, extent, size_threshold, self.opt.densify_grad_t_threshold)
++                            
++                    if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
++                        self.gaussians.reset_opacity()
++
++                # =============== 优化器步进 ===============
++                if iteration < self.opt.iterations:
++                    # 继承自 SWinGS 的自适应梯度缩放机制
++                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
++                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
++                        decay_factor = 1.0 / age.float()
++                        if self.gaussians._xyz.grad is not None:
++                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
++
++                    self.gaussians.optimizer.step()
++                    self.gaussians.optimizer.zero_grad(set_to_none=True)
++                    if self.env_map_optimizer and iteration < self.pipe.env_optimize_until:
++                        self.env_map_optimizer.step()
++                        self.env_map_optimizer.zero_grad(set_to_none=True)
++
++                # =============== 进度条与日志 ===============
++                if iteration % 10 == 0:
++                    postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]"}
++                    progress_bar.set_postfix(postfix)
++                    progress_bar.update(10)
++                
++                if iteration in self.testing_iterations:
++                    self.evaluate(iteration)
++                    
++                if iteration in self.saving_iterations:
++                    os.makedirs(self.args.model_path, exist_ok=True)
++                    torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
++
++        progress_bar.close()
++        
++        # 记录专属的 HybridGS JSON 日志
++        log_path = os.path.join(self.args.model_path, "hybridgs_metrics.json")
++        self.metrics_tracker.save_log(log_path)
++        print(f"[TrainerHybrid] 训练完成！软硬约束指标与模型已保存至 {log_path}。")
+\ No newline at end of file
+diff --git a/utils/trainer_swings.py b/utils/trainer_swings.py
+new file mode 100644
+index 0000000..3dcbe25
+--- /dev/null
++++ b/utils/trainer_swings.py
+@@ -0,0 +1,316 @@
++# SwinGS模型封装类
++# 文件：utils/trainer_swings.py
++import os
++import torch
++from random import randint
++from tqdm import tqdm
++from utils.loss_utils import l1_loss, ssim
++from gaussian_renderer import render
++from utils.trainer_4dgs import Trainer4DGS
++from utils.general_utils import knn
++from utils.image_utils import psnr # 确保导入了 psnr
++
++class TrainerSWinGS(Trainer4DGS):
++    """
++    引入滑动窗口和显式生命周期管理的长序列基线 (SWinGS)。
++    继承自 Trainer4DGS，重写训练大循环以支持局部时间窗口优化。
++    """
++    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
++        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
++        
++        # SWinGS 核心参数
++        self.swin_size = args.swin_size  # 滑动窗口大小 (如: 50帧)
++        self.total_frames = self.dataset.total_frames
++        
++        # 初始化第一个窗口
++        self.window_start = 0
++        self.window_end = min(self.swin_size - 1, self.total_frames - 1)
++        
++        # 计算滑动频率: 总迭代次数 / 需要滑动的总步数
++        slide_steps = max(1, self.total_frames - self.swin_size)
++        self.slide_interval = max(1, self.opt.iterations // slide_steps)
++
++    def _update_sliding_window(self, iteration):
++        """
++        核心机制 1：控制时间窗口滑动与显存按需加载
++        """
++        if iteration > 0 and iteration % self.slide_interval == 0:
++            if self.window_end < self.total_frames - 1:
++                self.window_start += 1
++                self.window_end += 1
++                
++                # 触发 Lazy DataLoader 的显存释放与新帧预加载
++                self.dataset.release_window(self.window_start)
++                self.dataset.prefetch_window(self.window_start, self.window_end)
++                # print(f"\n[SWinGS] 窗口已滑动: [{self.window_start} -> {self.window_end}]")
++                # [新增算法逻辑] 延长当前存活高斯的寿命，或者让太老的自然死亡
++                # SWinGS 的核心就是让离开窗口的动态点过期
++                with torch.no_grad():
++                    if self.gaussians._expire_frame.numel() > 0:
++                        # 找到在旧窗口末尾还活着的高斯，给它们续命到新窗口末尾
++                        # (具体的生命周期策略可根据你的 HybridGS 需求调整)
++                        alive_idx = self.gaussians._expire_frame == (self.window_end - 1)
++                        self.gaussians._expire_frame[alive_idx] = self.window_end
++
++    def _get_active_dynamic_mask(self, frame_id):
++        """
++        核心机制 2：获取当前帧存活的高斯掩码。
++        这里预留了高斯生命周期判定的接口。
++        """
++        # 如果模型内部尚未初始化生命周期数组，则返回 None（全量渲染）
++        if self.gaussians._start_frame.numel() == 0:
++            return None
++            
++        # 提取生命周期掩码: 高斯的出生时间 <= 当前帧 AND 高斯的过期时间 >= 当前帧
++        active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
++        
++        # 加上硬约束判定：如果是已被标记为绝对静止(mask==1)的，或者是动态存活的
++        if hasattr(self.gaussians, '_mask_dynamic'):
++            # 1 是静态背景，始终可见；2 是动态前景，受生命周期限制
++            final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic == 2) & active_mask)
++            return final_mask
++            
++        return active_mask
++
++    @torch.no_grad()
++    def evaluate(self, iteration):
++        """重写测试集评估：必须引入时间窗口掩码过滤残影"""
++        print(f"\n[评估 SWinGS] 正在执行 Iteration {iteration} 的测试集评估...")
++        
++        test_cameras = self.dataset.getTestCameras() if hasattr(self.dataset, 'getTestCameras') else []
++        if not test_cameras:
++            return
++            
++        total_psnr = 0.0
++        total_ssim = 0.0
++        total_fps = 0.0
++        
++        for viewpoint_cam in tqdm(test_cameras, desc="Testing"):
++            gt_image = viewpoint_cam.original_image.cuda()
++            
++            # [核心修复] 获取测试相机的真实帧号/时间戳
++            # 假设你的 Camera 类有 uid 或 timestamp 可以映射回 frame_id
++            frame_id = getattr(viewpoint_cam, 'uid', 0) 
++            
++            # 获取特定帧的干净掩码，过滤掉不在当前时间出生的点
++            active_mask = self._get_active_dynamic_mask(frame_id)
++            
++            render_pkg, fps = self.metrics_tracker.measure_fps(
++                render, 
++                viewpoint_camera=viewpoint_cam, 
++                pc=self.gaussians, 
++                pipe=self.pipe, 
++                bg_color=self.background, 
++                active_dynamic_mask=active_mask # 关键：必须传掩码！
++            )
++            
++            image = torch.clamp(render_pkg["render"], 0.0, 1.0)
++            total_psnr += psnr(image, gt_image).mean().item()
++            total_ssim += ssim(image, gt_image).mean().item()
++            total_fps += fps
++            
++        avg_psnr = total_psnr / len(test_cameras)
++        avg_ssim = total_ssim / len(test_cameras)
++        avg_fps = total_fps / len(test_cameras)
++        
++        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
++        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
++
++    def train(self):
++        """SWinGS 滑动窗口训练大循环"""
++        print(f"\n[TrainerSWinGS] 开始训练，窗口大小: {self.swin_size}，总帧数: {self.total_frames}")
++        self.metrics_tracker.start_timer()
++
++        # [新增算法逻辑] 初始化高斯的生命周期
++        if self.gaussians._start_frame.numel() == 0:
++            num_pts = self.gaussians.get_xyz.shape[0]
++            # 初始高斯的生命周期设为 [0, window_end]
++            self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
++            self.gaussians._expire_frame = torch.full((num_pts,), self.window_end, dtype=torch.int32, device="cuda")
++            # 初始化动静掩码 (默认 0：未分类)
++            self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
++
++        # 预加载初始窗口
++        self.dataset.prefetch_window(self.window_start, self.window_end)
++        
++        iter_start = torch.cuda.Event(enable_timing=True)
++        iter_end = torch.cuda.Event(enable_timing=True)
++        progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="SWinGS Training")
++        
++        for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
++            iter_start.record()
++            
++            # 1. 更新滑动窗口与学习率
++            self._update_sliding_window(iteration)
++            self.gaussians.update_learning_rate(iteration)
++            
++            if iteration % self.opt.sh_increase_interval == 0:
++                self.gaussians.oneupSHdegree()
++            if (iteration - 1) == self.args.debug_from:
++                self.pipe.debug = True
++
++            batch_size = self.args.batch_size
++            batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
++            batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
++            
++            loss = 0
++            # =============== 批处理循环 ===============
++            for batch_idx in range(batch_size):
++                # 【重要修改】：只在当前活跃的滑动窗口内随机抽帧！
++                frame_id = randint(self.window_start, self.window_end)
++                viewpoint_cam = self.dataset.get_camera_data(frame_id)
++                gt_image = viewpoint_cam.original_image.cuda()
++                
++                # 获取当前帧活跃的动态掩码
++                active_mask = self._get_active_dynamic_mask(frame_id)
++                
++                # 前向渲染 (传入 active_dynamic_mask 执行时间切片过滤)
++                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
++                image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
++                alpha = render_pkg["alpha"]
++                
++                viewspace_point_tensor_static = render_pkg.get("viewspace_points_static", [])
++                visibility_filter_static = render_pkg.get("visibility_filter_static", [])
++                radii_static = render_pkg.get("radii_static", [])
++
++# =============== 计算基础与正则损失 ===============
++                Ll1 = l1_loss(image, gt_image)
++                Lssim = 1.0 - ssim(image, gt_image)
++                current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
++                
++                if hasattr(self.opt, 'lambda_opa_mask') and self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
++                    o = alpha.clamp(1e-6, 1-1e-6)
++                    sky = 1 - viewpoint_cam.gt_alpha_mask
++                    current_loss += self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
++                    
++                # [核心算法修复]：只针对当前窗口存活的动态高斯计算刚性约束
++                if hasattr(self.opt, 'lambda_rigid') and self.opt.lambda_rigid > 0:
++                    # 获取当前存活的高斯数量
++                    num_active = active_mask.sum().item() if active_mask is not None else self.gaussians.get_xyz.shape[0]
++                    k = min(20, num_active - 1) # 防止存活点不足 20 个导致 KNN 报错
++                    
++                    if k > 0:
++                        xyz_cur = self.gaussians.get_xyz[active_mask] if active_mask is not None else self.gaussians.get_xyz
++                        idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
++                        
++                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
++                        active_velocity = velocity[active_mask] if active_mask is not None else velocity
++                        
++                        weight = torch.exp(-100 * dist)
++                        vel_dist = torch.norm(active_velocity[idx] - active_velocity[None, :, None], p=2, dim=-1)
++                        current_loss += self.opt.lambda_rigid * ((weight * vel_dist).sum() / k / num_active)
++
++                # [核心算法修复]：只针对当前存活的高斯计算运动正则
++                if hasattr(self.opt, 'lambda_motion') and self.opt.lambda_motion > 0:
++                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
++                    active_velocity = velocity[active_mask] if active_mask is not None else velocity
++                    current_loss += self.opt.lambda_motion * active_velocity.norm(p=2, dim=1).mean()
++
++                current_loss = current_loss / batch_size
++                current_loss.backward()
++                loss += current_loss.item()
++                
++                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
++                batch_radii.append(radii)
++                batch_visibility_filter.append(visibility_filter)
++
++                static = len(viewspace_point_tensor_static) > 0
++                if static:
++                    batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
++                    batch_radii_static.append(radii_static)
++                    batch_visibility_filter_static.append(visibility_filter_static)
++
++            # =============== 梯度累加逻辑 (同基线) ===============
++            if batch_size > 1:
++                visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
++                visibility_filter = visibility_count > 0
++                radii = torch.stack(batch_radii, 1).max(1)[0]
++                batch_viewspace_point_grad = torch.stack(batch_point_grad, 1).sum(1)
++                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
++                
++                if static:
++                    visibility_count_static = torch.stack(batch_visibility_filter_static, 1).sum(1)
++                    visibility_filter_static = visibility_count_static > 0
++                    radii_static = torch.stack(batch_radii_static, 1).max(1)[0]
++                    batch_viewspace_point_grad_static = torch.stack(batch_point_grad_static, 1).sum(1)
++                    batch_viewspace_point_grad_static[visibility_filter_static] = batch_viewspace_point_grad_static[visibility_filter_static] * batch_size / visibility_count_static[visibility_filter_static]
++                    batch_viewspace_point_grad_static = batch_viewspace_point_grad_static.unsqueeze(1)
++                
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
++                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
++                    batch_t_grad = batch_t_grad.unsqueeze(1)
++            else:
++                if self.gaussians.gaussian_dim == 4:
++                    batch_t_grad = self.gaussians._t.grad.clone().detach()
++                    
++            iter_end.record()
++
++            # =============== 致密化与指标记录 ===============
++            with torch.no_grad():
++                # 记录指标
++                if iteration % 100 == 0:
++                    num_4d = self.gaussians.get_xyz.shape[0]
++                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
++                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
++                    
++                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
++                    self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
++                    if static:
++                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
++                    
++                    if batch_size == 1:
++                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                    else:
++                        self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
++                        if static:
++                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
++
++                    if iteration > self.opt.densify_from_iter:
++                        size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
++                        if iteration % self.opt.densification_interval == 0:
++                            extent = getattr(self.dataset, 'cameras_extent', 1.0)
++                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, extent, size_threshold, self.opt.densify_grad_t_threshold)
++                            if hasattr(self.gaussians, 'dynamic2static'):
++                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
++                                
++                    if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
++                        self.gaussians.reset_opacity()
++
++                # 优化器步进
++                if iteration < self.opt.iterations:
++                    # [新增] SWinGS 自适应梯度缩放机制
++                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
++                        # 估算每个高斯存活的窗口数量 (当前帧号 - 出生帧号)
++                        # 为防止除零，最小存活单位设为 1
++                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
++                        decay_factor = 1.0 / age.float()
++                        
++                        # 仅对动态点应用空间梯度衰减，防止老点被过度拉扯
++                        if self.gaussians._xyz.grad is not None:
++                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
++                    self.gaussians.optimizer.step()
++                    self.gaussians.optimizer.zero_grad(set_to_none=True)
++                    if self.env_map_optimizer and iteration < self.pipe.env_optimize_until:
++                        self.env_map_optimizer.step()
++                        self.env_map_optimizer.zero_grad(set_to_none=True)
++
++                # 进度与评估
++                if iteration % 10 == 0:
++                    postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]"}
++                    progress_bar.set_postfix(postfix)
++                    progress_bar.update(10)
++                
++                if iteration in self.testing_iterations:
++                    self.evaluate(iteration)
++                    
++                if iteration in self.saving_iterations:
++                    os.makedirs(self.args.model_path, exist_ok=True)
++                    torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
++
++        progress_bar.close()
++        
++        log_path = os.path.join(self.args.model_path, "swings_metrics.json")
++        self.metrics_tracker.save_log(log_path)
++        print(f"[TrainerSWinGS] 训练完成！")
+\ No newline at end of file
+diff --git "a/\344\273\243\347\240\201\347\274\226\345\206\231\350\247\204\345\210\222.md" "b/\344\273\243\347\240\201\347\274\226\345\206\231\350\247\204\345\210\222.md"
+new file mode 100644
+index 0000000..b67d745
+--- /dev/null
++++ "b/\344\273\243\347\240\201\347\274\226\345\206\231\350\247\204\345\210\222.md"
+@@ -0,0 +1,244 @@
++# **面向长序列表演视频的混合3D与4D高斯场景重建：系统架构与底层代码实现全景规划**
++
++## **引言与研究背景**
++
++在计算机视觉与图形学领域，从二维图像中重建并渲染动态三维场景一直是一项极具挑战性的核心任务。真实世界的动态场景不仅包含复杂的几何拓扑变化，还伴随着高频的外观与运动更迭 1。近年来，神经辐射场（Neural Radiance Fields, NeRF）通过隐式连续体积函数与多层感知机（MLP）极大地推动了新视角合成技术的发展 1。然而，NeRF在训练与渲染阶段庞大的计算开销使其难以满足实时交互的需求 1。在此背景下，3D高斯溅射（3D Gaussian Splatting, 3DGS）作为一种范式转移技术应运而生，其通过显式的各向异性高斯椭球集合表示场景，结合基于CUDA的高效Tile-based光栅化技术，实现了高保真度与实时渲染的完美平衡 1。
++
++然而，当应用场景延伸至长达2至3分钟的超高清长序列表演视频（如央视春晚舞台表演）时，现有的动态3DGS与4DGS方法暴露出了严重的理论局限与工程瓶颈。传统的4D高斯溅射（4DGS）将时间作为第四维度引入，赋予所有高斯点时空属性，这种全局动态建模方式在处理分钟级视频时，会导致参数量呈指数级爆炸，从而引发显存溢出（OOM）问题 1。此外，舞台表演具有典型的“间歇性动态”特征，即背景环境（如脚手架、幕布）绝对静止，而前景演员在表演过程中存在周期性的动作停顿与爆发 1。现有方法在处理此类长序列间歇性动态时，往往陷入“计算冗余过高”或“静止帧产生几何抖动”的两难境地 1。
++
++为了突破这一瓶颈，本研究系统性地提出并规划了一套高可行性、可落地的底层代码实现蓝图。该系统架构以开源的3D-4DGS代码库为基座，深度融合了滑动窗口高斯溅射（SWinGS）的长序列处理优势，并最终构建出一套包含鲁棒硬约束与位移收敛软约束的混合高斯模型（HybridGS） 1。本报告将从底层框架搭建、基线模型封装、核心创新机制的数学映射与代码整合、统一渲染管线、评估追踪系统以及可视化UI集成等六个维度，提供详尽的底层实现逻辑与架构设计规划。
++
++## **统一代码框架与系统整体架构设计**
++
++为了满足对3D-4DGS、SWinGS以及HybridGS三种模型进行无缝切换、联合训练与公平对比的严格需求，系统架构必须摒弃传统的强耦合代码结构，转而采用基于策略模式（Strategy Pattern）与工厂模式（Factory Pattern）的模块化解耦设计。
++
++系统的代码流转被划分为数据加载、参数管理、训练引擎、渲染光栅化与评估记录五大核心生命周期。在项目根目录下，将重构执行入口文件，通过命令行参数进行模型路由。
++
++| 模块层级 | 核心代码文件路径 | 功能定位与代码改写规范说明 |
++| :---- | :---- | :---- |
++| **路由入口层** | train.py, render.py, metrics.py | 重构命令行解析器（ArgumentParser），新增--model\_type参数（可选值包括baseline\_4dgs, swings, hybrid\_gs）。通过工厂函数动态实例化对应的场景管理器与训练迭代器，确保主干逻辑无冗余条件分支。 |
++| **数据流转层** | scene/dataset.py, scene/cameras.py | 针对分钟级长序列导致内存/显存溢出的痛点，引入基于滑动窗口的按需懒加载机制（LazyCamera与LazyDataloader），替代原3D-4DGS中一次性将所有帧载入显存的策略 1。 |
++| **参数容器层** | scene/gaussian\_model.py | 统一的高斯属性管理容器。在原生位置、旋转、缩放、球谐函数（SH）及不透明度属性之上，扩展时间坐标、时空旋转矩阵、生命周期掩码（start, expire）以及动态/静态分类标识（Mask），并提供统一的显存分配与梯度截断接口 1。 |
++| **训练策略层** | utils/trainer\_4dgs.py, trainer\_swings.py, trainer\_hybrid.py | 采用面向对象继承机制，构建基类BaseTrainer，派生出三种模型的特定训练循环。其中trainer\_hybrid.py将负责执行时空硬约束分类器与软约束正则化损失图的构建 1。 |
++| **混合渲染层** | gaussian\_renderer/\_\_init\_\_.py | 重构前向渲染管线。在输入层接收统一的高斯集合，根据当前时间戳![][image1]切片4D高斯并与3D高斯在显存中进行张量拼接（Concatenation），随后调用统一的CUDA光栅化器进行深度排序与混合 1。 |
++| **监控评估层** | utils/metrics\_tracker.py | 实现统一的单例监控记录仪。在训练循环的预设验证频率处，自动计算PSNR、SSIM与LPIPS，并利用PyTorch底层的torch.cuda.max\_memory\_allocated()等接口捕捉VRAM消耗与渲染帧率 2。 |
++| **可视化集成** | ui\_main.py (新增) | 基于PyQt5/PySide6或Gradio框架构建整合软件，将训练配置下发、实时指标图表绘制、渲染输出映射以及3D自由视点漫游功能集成在同一个图形用户界面中 1。 |
++
++通过上述模块化设计，任何底层算法的修改仅需在其对应的作用域内进行，例如修改HybridGS的损失函数不会干扰3D-4DGS的基线验证，从而在代码层面上绝对保证了实验比对的严谨性与系统的长期可维护性。
++
++## **基准模型封装：3D-4DGS 架构解析与适配**
++
++本项目的底层代码库派生自已有的3D-4DGS开源实现，其核心思想是建立一个完全四维的高斯表示，并自适应地将时间上不变的高斯转化为纯三维高斯，以减少冗余计算并提升推理速度 1。为了将其规范化封装为系统的基准比较模型之一，需要明确其参数定义、转换逻辑及渲染接口的代码实现路径。
++
++### **初始四维参数化与空间流形表示**
++
++在scene/gaussian\_model.py中，4D高斯不仅包含三维空间中心$\\mu\_x \\in \\mathbb{R}^3$，还包含一个独立的时间坐标$\\mu\_t \\in \\mathbb{R}![][image2]R\_{4D}$ 1。在代码实现中，该旋转矩阵由一对各向同性的旋转四元数构建，使得高斯椭球能够在四维空间中进行倾斜和拉伸。
++
++在渲染阶段的前向传播中，当查询特定的时间戳![][image1]时，系统需要将4D高斯“切片”（Slice）为瞬态的3D高斯。代码逻辑将实现如下张量运算：瞬态中心位置 ![][image3] 由空间中心加上协方差矩阵中时空交叉项与时间差的乘积计算得出；瞬态协方差 ![][image4] 则通过对4D协方差矩阵进行舒尔补（Schur Complement）操作求得 1。这种切片机制允许渲染管线无缝复用原生的3DGS CUDA光栅化算子。
++
++### **基于时间尺度的自适应静态转化逻辑**
++
++3D-4DGS最具代表性的优化在于其在致密化（Densification）阶段的自适应转化机制。为了在代码中封装这一逻辑，将在训练循环（trainer\_4dgs.py）中设计一个定期触发的转换探针。
++
++该探针会遍历当前场景中所有的4D高斯，并提取其时间维度的缩放参数（Temporal Scale）![][image5]。经过指数激活函数![][image6]（如$\\tau=3.0$），代码将判定该高斯代表的是场景中没有高频时间变化的静态区域 1。
++
++满足条件的高斯将触发降维转换函数convert\_4d\_to\_3d(gaussian\_indices)。该函数将直接抹除时间坐标$\\mu\_t![][image7]R\_{4D}![][image8]R\_{3D}![][image9]q\_{3D}=(w, x, y, z)$ 1。在完成参数降维后，调用PyTorch的detach\_()方法截断其时间属性的梯度回传路径，将其永久固化为静态属性，从而在后续的训练与推理中大幅节省显存带宽与计算周期。
++
++## **时域扩展基准：SWinGS 模型的代码移植与编写**
++
++尽管3D-4DGS具备一定的冗余消除能力，但面对长达2至3分钟（包含数千帧）的连续舞台表演视频时，它依然试图在一个全局的优化空间中拟合整个时间轴。这种全局优化不可避免地会导致GPU显存需求随视频长度呈线性爆炸增长，同时也面临着灾难性的遗忘与内容偏移问题 1。
++
++为了使框架具备处理长序列表演视频的可伸缩性，必须将SWinGS（Sliding Window Gaussian Splatting）的滑动窗口训练机制与按帧更新（Per-Frame Update）范式深度移植到系统中 1。
++
++### **长序列动态数据加载器（Lazy DataLoader）的构建**
++
++在原生的3DGS与3D-4DGS实现中，数据预处理阶段会将多视角相机采集的全部高分辨率图像及位姿参数一次性读取并驻留于GPU显存中 1。这对于短视频（如50帧）是可行的，但对于3000帧以上的长序列则是灾难性的。
++
++因此，需在scene/dataset.py中实现一个全新的数据加载器类LazyCameraDataloader。该类将采用按需加载（Lazy Loading）策略。具体而言，它仅在内存中维护图像的物理存储路径索引与轻量级的相机内参矩阵。在训练过程中，伴随着时间窗口的滑动，加载器通过异步I/O线程将当前窗口区间 ![][image10] 内的张量预抓取到显存中，并利用释放队列同步清理滑出窗口的陈旧数据。这一核心底层改写确保了无论视频序列多长，系统显存峰值均被稳定限制在滑动窗口长度（swin\_size）所决定的常数级别 1。
++
++### **显式生命周期管理与滑动窗口优化策略**
++
++在SWinGS的架构中，高斯点不再是全局存在的实体，而是具有明确寿命的瞬态粒子。在gaussian\_model.py的高斯属性张量中，需新增两个整型张量属性：start\_frame（激活起始帧）与expire\_frame（失效过期帧） 1。
++
++在trainer\_swings.py的训练策略中，滑动窗口管理器控制着一个固定长度为swin\_size的时间切片沿视频序列推进。在当前窗口下，系统仅从高斯池中过滤并提取生命周期涵盖当前窗口的高斯（active\_idx）参与前向渲染与反向传播。
++
++为了解决长序列中内容剧烈偏移的问题，系统需要在窗口向前滑动时执行动态的更迭。当窗口进入新的时间段时，生命周期结束的高斯将被标记为成熟（Matured）并进行快照存档，不再参与梯度更新；同时，系统注入一批全新的、可优化的高斯用于拟合未来帧的未知场景 1。在窗口内部，贡献于后期帧的高斯与前期帧的高斯进行联合优化（Joint Optimization），这既保障了紧凑的特征表示，又维持了视觉渲染在时间上的平滑过渡。
++
++### **梯度缩放与马尔可夫链蒙特卡洛（MCMC）重定位**
++
++由于不同高斯在滑动窗口中的存活时间不同，传统Adam优化器基于全局步数的学习率衰减（Learning Rate Decay）策略会引发参数更新的严重失衡 1。代码层面必须实现一种自适应梯度缩放（Adaptive Gradient Scaling）机制。在执行optimizer.step()之前，通过底层的张量运算，将每个高斯均值属性的梯度乘以一个衰减系数，该系数与其已经参与训练的滑动窗口数量成反比，从而在数学上达成精准的局部衰减近似。
++
++此外，为了在长序列中维持高斯总数（num\_gs）的绝对恒定，避免模型无限膨胀，系统将抛弃原生3DGS中暴力的克隆与分裂（Clone & Split）致密化策略，转而实现基于随机梯度朗之万动力学（SGLD）的MCMC重定位（Relocation）机制 1。具体而言，在定期触发的拓扑调整周期中，代码将筛选出不透明度极低（即对画面无贡献的“死”高斯），并不将其删除，而是重置其协方差与球谐特征，并将其空间坐标强行转移至当前梯度变化剧烈或不透明度极高的“活”高斯附近。这一策略赋予了闲置计算资源新的生命周期，使得固定数量的高斯能够像水流一般随着表演者的运动在场景中动态迁移。
++
++## **核心创新研究：HybridGS 混合模型的底层实现架构**
++
++前述的3D-4DGS与SWinGS分别代表了空间冗余压缩与时间维度扩展的两个极端。然而，将它们直接应用于长序列表演视频时均暴露出致命缺陷：3D-4DGS单纯依赖时间尺度的硬约束极易对由于间歇性表演而短暂停顿的演员产生“误判”，将其永久冻结为静态背景，导致后续动作撕裂；而SWinGS虽然解决了长度限制，但全量使用动态高斯进行时间切片，对完全静止的舞台背景造成了惊人的算力浪费 1。
++
++本毕设的核心创新点——HybridGS，旨在通过空间与时间的深度双重解耦，融合硬约束（Hard Constraint）与软约束（Soft Constraint），在渲染性能、训练效率与长序列鲁棒性之间达到理论上的最优解。
++
++### **鲁棒硬约束（Robust Hard Constraint）：多维联合判定的背景固化**
++
++为了彻底消除空间冗余，HybridGS将基于3D-4DGS的代码框架，但彻底重写其4D至3D的转化评估器。在长序列舞台表演中，背景环境是唯一需要被转化为3D高斯的区域。为了防止前景演员的间歇性停顿被误判，代码将在trainer\_hybrid.py中实现一套包含双重阈值的联合判定逻辑 1。
++
++判定器不仅评估时间尺度，更引入基于空间偏移的精确衡量。其数学定义与底层代码逻辑分为两步：
++
++1. **平均位移计算（![][image11]）**：计算高斯点在当前滑动窗口周期 ![][image12] 内，各个时间戳产生的瞬态中心位置 ![][image3] 与该周期内平均位置 ![][image13] 的欧几里得距离均值。此项用于衡量目标在宏观时间段内的整体活跃度。  
++   ![][image14]  
++2. **最大瞬时位移计算（![][image15]）**：计算相邻两帧之间高斯中心位置发生的最大几何突变。此项用于捕捉极短时间内的爆发性动作，避免慢动作对象被平滑掩盖。  
++   ![][image16]
++
++在CUDA底层或基于PyTorch的并行张量运算中，系统将同时收集这两个指标矩阵。当且仅当满足联合条件 ![][image17] 时，分类器才会确认该高斯属于绝对静止的舞台背景 1。随后，系统触发降维函数，将其从4D状态永久转化为3D静态高斯，并从滑动窗口的可优化参数图中剥离，放入只读的“全局背景显存池”中。这种鲁棒硬约束机制成功规避了由于表演停顿引发的灾难性误判。
++
++### **位移收敛软约束（Soft Constraint）：间歇性动态的自适应时间正则化**
++
++对于通过了上述硬约束考验、成功保留在滑动窗口中并维持4D属性的前景动态高斯，由于表演固有的间歇性，它们在时间轴上会经历“运动-静止-运动”的阶段 1。在缺乏明确视觉特征变化（Photometric Gradient）的静止阶段，如果任由神经网络在4D参数空间中自由探索，极易引发微小的几何位置漂移和画面闪烁（Flickering Jitter） 6。
++
++为了彻底解决这一难题，HybridGS的核心贡献是在损失函数模块（loss\_utils.py）中设计并植入位移收敛正则化项（Displacement Convergence Regularization）![][image18] 作为软约束。
++
++在每次前向渲染与反向传播的计算图中，系统提取当前所有被标记为动态的前景高斯在时间 ![][image1] 与时间 ![][image19] 处的空间切片位置差异，其数学惩罚项定义如下： ![][image20] 其中 ![][image21] 1。
++
++最终的全局损失函数被重构为：
++
++![][image22]
++
++**动力学自适应机制分析**： 这一软约束设计的精妙之处在于其自适应的时间博弈。在演员处于静止（或微小形变）的帧片段中，由于图像渲染的![][image23]与D-SSIM损失梯度极低，$L\_{reg\_d}$正则化项的惩罚梯度将占据主导地位，它会在反向传播中强行拉扯4D高斯的时间分布属性，迫使其在相邻帧间的空间位移趋近于零，使得这些保留了4D参数的高斯在物理表现上自动“坍缩”呈现出3D静态特征，有效压制了抖动现象。而当演员重新做出大幅度动作时，Ground Truth图像与渲染预测图像之间产生的巨大差异将产生压倒性的光度损失梯度（Photometric Loss），这股强烈的梯度流会瞬间冲破正则化项的束缚，重新激活高斯点在4D参数空间中的变形能力，精确捕捉瞬间爆发的动作细节 1。
++
++通过硬约束的大规模空间冗余剔除，结合软约束在时间轴上的自适应抑制与激活，HybridGS在底层数学逻辑上实现了对长序列表演场景的最优化拟合。
++
++### **SWinGS 机制的无缝混合集成架构**
++
++为了让上述逻辑在长序列中顺利运转，代码还需要处理HybridGS与滑动窗口的混合内存调度。在trainer\_hybrid.py中，系统维护两个隔离的参数池：一个是不断增长但参数锁定的**只读3D背景池**；另一个是依据SWinGS规则在时间轴上滑动的**活跃4D前景池**。
++
++每次渲染某帧图像时，渲染引擎（gaussian\_renderer）接收来自主控程序的指令，利用张量拼接（torch.cat）操作，将背景池中的全量静态高斯与当前滑动窗口中切片生成的瞬态前景高斯进行混合打包，随后送入CUDA光栅化器执行统一的深度排序与渲染输出 1。这种解耦设计使得极其消耗VRAM的反向传播与参数优化运算仅仅发生在一个极小的滑动窗口前景色上，赋予了模型处理无限长视频流的工程潜力。
++
++## **全自动指标评估器追踪与日志记录系统**
++
++学术级代码框架必须具备严谨、可复现的自动化实验跟踪机制。在项目中将新建一个utils/metrics\_tracker.py模块，封装为全局单例记录仪，与各个Trainer深度绑定，确保在基线模型与HybridGS之间展开绝对公平的消融对比实验 2。
++
++### **渲染图像质量评估（Quality Metrics）**
++
++系统需要内嵌学术界公认的三大图像质量评价标准，并在指定的测试集（Test Views/Holdout Cameras）和验证帧上定期触发：
++
++* **PSNR（峰值信噪比）**：衡量渲染结果与真实图像的像素级均方误差（MSE）。在代码中直接利用PyTorch张量加速计算对数公式，反映高频细节的重建保真度 1。  
++* **SSIM（结构相似性指数）**：评估图像的亮度、对比度与局部纹理结构的相似度。系统将引入优化过的pytorch\_msssim库进行批量计算，特别用于评估动态边缘处的闪烁和模糊现象 1。  
++* **LPIPS（学习感知图像块相似度）**：利用预训练的VGG或AlexNet作为骨干网络提取深层特征，用于评估更符合人类视觉感知的图像质量差异 1。由于该指标前向传播耗时较长，评估器将提供配置参数支持针对关键帧的抽样测试。
++
++### **运行时效率与显存资源监控（Efficiency Metrics）**
++
++除了画面质量，长序列重建更注重性能的可扩展性。系统将通过底层接口实时监控并捕获以下数据：
++
++* **训练耗时与渲染帧率（FPS）**：利用CUDA底层事件同步机制（torch.cuda.Event(enable\_timing=True)）包裹渲染核心函数，剔除CPU异步调度干扰，获取极致精准的渲染耗时。实时监控FPS是证明HybridGS通过硬约束冻结背景后显著提升渲染吞吐量的最直接论据 1。  
++* **VRAM峰值分析（Memory Tracking）**：在滑动窗口的每个生命周期迭代结束时，调用torch.cuda.max\_memory\_allocated()记录显存峰值 1。这一数据将直接用于绘制消融实验对比图，以呈现HybridGS如何通过空间解耦彻底打破4DGS随视频长度增长的显存爆炸诅咒。
++
++所有的追踪数据均会实时序列化至JSON格式日志文件，并通过内置的TensorBoard或Weights & Biases (WandB)接口进行流式推送，在可视化面板中生成训练收敛曲线与资源占用折线图。
++
++## **渲染引擎拓展与三维自由视点漫游管线**
++
++完成耗时的训练后，能够流畅读取模型参数并生成自由视点漫游视频，是该系统落地的关键闭环。此模块涵盖了模型参数序列化协议的重构以及平滑虚拟相机轨迹的生成算法。
++
++### **自定义混合点云序列化协议 (.PLY)**
++
++原生的3DGS仅支持固定属性的.ply格式导出，无法应对混合模型中不同维度参数并存的情况。需要在scene/gaussian\_model.py中实现自定义的序列化（Save/Load）接口 1。
++
++针对被硬约束分类器转化为纯3D静态背景的高斯，在写入.ply文件时将彻底抛弃时间、速度及4D旋转特征列，实现文件体积的极大压缩；而对于包含动态时间戳的前景4D高斯，则写入全量的时空高维参数。为了保证反序列化解析时的正确内存映射，文件头（Header）将注入特定的结构标识符（如is\_dynamic掩码列），指示渲染器在重构张量显存时采取差异化的排布逻辑 1。
++
++### **沉浸式漫游相机轨迹生成算法**
++
++为了模拟央视春晚观众席中90°至120°环绕式视角的平滑转移 1，将在框架中独立开发camera\_trajectory.py模块。系统支持输入离散的关键帧视点（Keyframe Views，通常从COLMAP的稀疏位姿中人工选取极值点）。
++
++在生成中间过渡帧位姿时，针对相机的空间平移向量![][image12]，系统将采用B样条曲线（B-Spline）插值算法生成圆滑的空间弧线；针对相机的三维旋转矩阵，系统将其转化为四元数表示后，应用球面线性插值（Spherical Linear Interpolation, Slerp）算法确保视角切换过程中的视场平滑且无万向节死锁（Gimbal Lock）。当虚拟相机的时空轨迹映射到视频的时间轴![][image1]时，渲染管线将源源不断地吐出带有平滑运镜的逼真、无死角的体积视频帧序列 1。
++
++## **交互式可视化集成软件（UI）架构方案**
++
++将庞杂的命令行脚本、配置文件编辑、训练日志以及渲染管线深度封装为一个所见即所得的可视化图形交互界面，是提升该工程应用价值与易用性的关键保障。系统规划以 **PyQt5/PySide6** 为底层窗口框架，结合 **OpenGL/WebGL** 为高性能渲染引擎构建端到端的用户界面 ui\_main.py 1。
++
++UI集成软件划分为三大功能明确的并行模块面板：
++
++### **1\. 控制台与超参数精细配置中心（Control Panel）**
++
++该面板提供直观的下拉菜单与文件选择器，供用户无缝切换训练引擎（原生3D-4DGS基线、SWinGS长序列基线、核心HybridGS混合模型）。用户可通过交互式滑块（Slider）和数字输入框直连底层YAML配置系统，动态调节核心超参数：
++
++* 控制长视频加载规模的 swin\_size（滑动窗口长度）  
++* 决定渲染上限的高斯点总数 num\_gs  
++* 控制硬约束严格程度的平均位移阈值 ![][image24] 与最大瞬时位移阈值 ![][image25]  
++* 调控软约束强度的惩罚系数 ![][image26]  
++  参数修改后将通过后台守护进程动态注入到Python运行环境中。
++
++### **2\. 状态监听与全息指标看板（Monitor Panel）**
++
++UI后端通过建立多线程异步通信（QThread）机制挂载耗时的训练脚本，利用Qt特有的信号与槽（Signal & Slot）机制，将控制台标准输出重定向至UI日志窗，避免主线程UI阻塞假死 5。同时，内嵌基于pyqtgraph或matplotlib的实时绘图画布，接收MetricsTracker推送的数据流，动态绘制多维折线图。用户可以直观地对比观察不同模型在长序列表演重建中的显存占用峰值差异、PSNR与SSIM保真度收敛速度，实现全透明的实验过程监控。
++
++### **3\. 沉浸式实时渲染与交互视窗（Viewer Panel）**
++
++UI的核心是高性能的渲染视窗集成。通过在Qt框架内嵌入OpenGL控件（或通过本地端口映射至嵌入式Web引擎中的WebGL画布），UI线程将实时截获CUDA底层光栅化输出的显存数据阵列，并映射转化为前端纹理缓冲区（Texture Buffer）进行逐帧渲染 1。
++
++界面将绑定鼠标与键盘事件捕获监听器（Event Listeners）。当用户拖拽时间轴进度条（Timeline）播放长序列舞台表演时，可以同时通过按住鼠标左键与滚轮，在三维空间中实时拖拽相机位姿，任意改变俯仰角（Pitch）、偏航角（Yaw）及缩放距离，深度检验系统在处理长序列高频动作和复杂光影环境时的时空连贯性、几何边缘的锐利度以及无可比拟的超高渲染帧率表现。
++
++## **结语**
++
++本项代码规划蓝图紧扣针对分钟级长序列舞台表演视频的需求，基于对3D-4DGS与SWinGS原理的深刻剖析与移植，提出了具有高度创新性与落地价值的HybridGS混合模型框架。整个系统设计依托于严密的模块化解耦原则，将数据动态加载、双重阈值鲁棒硬约束降维、位移收敛正则化软约束惩罚以及基于滑动窗口的内存调度机制在底层代码中进行了无缝拼接。配合全自动的评估追踪管线与高度集成的交互式UI可视化平台，该开发路线图将为攻克动态三维场景重建中的显存瓶颈与长序列时空一致性难题，提供一套成熟、高效、极具学术前瞻性与工程应用潜力的工业级解决方案。
++
++#### **引用的著作**
++
++1. SWinGSSliding Windows for Dynamic 3D Gaussian Splatting-dual.pdf  
++2. Evaluation \- gsplat documentation, 访问时间为 三月 2, 2026， [https://docs.gsplat.studio/main/tests/eval.html](https://docs.gsplat.studio/main/tests/eval.html)  
++3. SwinGS: Sliding Window Gaussian Splatting for Volumetric Video Streaming with Arbitrary Length | Read Paper on Bytez, 访问时间为 三月 2, 2026， [https://bytez.com/docs/arxiv/2409.07759/paper](https://bytez.com/docs/arxiv/2409.07759/paper)  
++4. Hybrid 3D-4D Gaussian Splatting for Fast Dynamic Scene Representation \- GitHub Pages, 访问时间为 三月 2, 2026， [https://ohsngjun.github.io/3D-4DGS/](https://ohsngjun.github.io/3D-4DGS/)  
++5. \[Revue de papier\] SwinGS: Sliding Window Gaussian Splatting for Volumetric Video Streaming with Arbitrary Length \- Moonlight, 访问时间为 三月 2, 2026， [https://www.themoonlight.io/fr/review/swings-sliding-window-gaussian-splatting-for-volumetric-video-streaming-with-arbitrary-length](https://www.themoonlight.io/fr/review/swings-sliding-window-gaussian-splatting-for-volumetric-video-streaming-with-arbitrary-length)  
++6. SWinGS: Sliding Windows for Dynamic 3D Gaussian Splatting \- arXiv, 访问时间为 三月 2, 2026， [https://arxiv.org/html/2312.13308v2](https://arxiv.org/html/2312.13308v2)  
++7. SS4D: Native 4D Generative Model via Structured Spacetime ... \- Bytez, 访问时间为 三月 2, 2026， [https://bytez.com/docs/arxiv/2512.14284/paper](https://bytez.com/docs/arxiv/2512.14284/paper)  
++8. Ainsley0917/gaussian-splatting \- GitHub, 访问时间为 三月 2, 2026， [https://github.com/Ainsley0917/gaussian-splatting](https://github.com/Ainsley0917/gaussian-splatting)  
++9. 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods \- Wm.github.com, 访问时间为 三月 2, 2026， [https://w-m.github.io/3dgs-compression-survey/](https://w-m.github.io/3dgs-compression-survey/)  
++10. nerfstudio-project/gsplat: CUDA accelerated rasterization of gaussian splatting \- GitHub, 访问时间为 三月 2, 2026， [https://github.com/nerfstudio-project/gsplat](https://github.com/nerfstudio-project/gsplat)
++
++[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAcAAAAbCAYAAACwRpUzAAAAmklEQVR4XmNgGLlABl0ABqSAuB5dEAYygNgUXRAE2IC4H4hFkQXDgPg1EP9HwpeAWAckyQXEwkDsAsSPoWxBIGYCScJALAPEBAzADMQdQLwXXQIEhIB4MxDPQJcAgUgGiEMcGCCmgOznB0nAjDwMxApArAHEjUDMDpIEAVCobGeAuLQNiLVgEiBgA8QngLgbiC2RJWAA5t/BCwC/RxR6NNrX7gAAAABJRU5ErkJggg==>
++
++[image2]: <data:image/png;base64,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>
++
++[image3]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACsAAAAZCAYAAACo79dmAAACS0lEQVR4Xu2W24tOURjGX4eQ82HkkMNcIKRcaOTcp8ah3OBGiTuTU1xIblBMjVAoycyNQ8oNc0UpF8o/wKVcKpf+CJ6f911ae9mfmfBp0n7q17f3s/Ze693vetc7Y9aoUaNGjRr9D5oqJpXmWNRi8VpcExPCGycOi0diVnhjQj3ikziRebPFc/FEzMj8v6l5Yk9pjiSC/CK2Z95q8U5cNs9yJ/Rbwd4Xb8zLIWm/+Bq/ndJ8sbfwzoqLhVcRWa0rAeC6U2L3DhTeK7Gu8Coig63sfo14L/rNS2BL+GTikrhinvGr4oHoFjvEDfE07tEdsTauyeAzsVQcMj8nebDLxW3xUTwWfWJ8jP0QLYtgt2Xe0fAIaLJ5UDx3yrwzcH1ebBWfxWZxTCwUL+MevTAvLfwz5ms8FEfMk1CX2ZSgWjEZge3LvLfhMTkTDohFYkOMUxotMU2sFxPFKvMDSrDsABoy/7Ak3ie4lLEyWLrOL88ItcoiTMrpnB4+AcwNH7EAQeIzYfKXmGefZwm0FT4Bp+5CpnbHL2LLWacMls7AGsy3IvO/iwX5+rwLtNMu8UFsFNfDmyNOm0/Ohw6bZxqRxe643iluxjObxAXzd8pgz5n/Ueo1r+mKCJKWlW9VO/HyoDhuXp9kl0XTlrMIdXwrxsky81Ie1OsC89LikFHDqAyWnTgpDlpN3XIQaFujFYunD5tp1QnTGNvbJe6GP8W8dBCHMz/hZbBoNIn7Y9G26CL8P3FPLKsO16ou2H+idCDJ3k9b2EYrbYTTn/QNEctLbqEfqDwAAAAASUVORK5CYII=>
++
++[image4]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC0AAAAYCAYAAABurXSEAAACHklEQVR4Xu2Wz0tUURTHv/3AoqLUEiIMCyJQkEBR2iQT5I9l4kKQihZCgiAoIgSKujICqVwIIi6FIALBhW7cCPYXRBs37fsj6vvl3Nt7c5ynwzjDzGI+8OW9d8+8+77vzDn3PqBOnTp1zsMU9Zf6Se0X0FGIS4PhnqpzF2bokHroYpE56g/12geqyTHM+Dp1w8XEFWqVWvSBavIGSQm8c7FIP8x4gw9Uk8fUD5hxlYxH2e4Kx5riBfWbWqAu54dqFxl9D2u6YReraZqpHRQukUqiJF3zg8XQQR34wUAL9YVq9IEyMYJ80+qfb7AkZqLMfqde+UDgCfUZJWajCCaQP7euP+GU1eo2tQEzfMHFIuOo7DrtTcuwnpmJNhU1YNaK0QlbDmfCtUplnlqCTb5MbVEPQryP2k5d34KVnhiCfTLcp0apnjAeTV+lpmEbnv75FepO+M1/xpBsLGcpZ7egOxxV36q767Dy0UtrvZd2YS8ntP37slLjXUxdF8p0Zmmch3aYOc8lahZWanqwDEQ09iwc06RN6563Sag8KMPK6ktqM4y1Itkt1fG5cK5sxxeT0YEg0YbkWydt+h6SsnmEMu3Cv6he6gOsOZuoSSSTq7FVLkKltBfOn1MfYcvZU9jXY7wnbVqGZVyJUGn5f6UkNHl8gDLuJ1VMGVQDrcFWATVYbHTVcrqeha/pmzg5b8XQSvE1nCuzOi9md/WmC/IPmnVPqKTDf/sAAAAASUVORK5CYII=>
++
++[image5]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABcAAAAaCAYAAABctMd+AAABRUlEQVR4Xu2Tuy4FURSGl0vcIu4SUcghKEQlRKuQeAESjUREoZJQ0VKg0ilI3Do8AImIQuMBdB6G7z9r5tizHTHJoZsv+TLZa83sy9przAoKCgoq1GM3dsaJWtCki/iCp3iLA5k3auAC97AuGS/h+lc6F43m333jHt9wG4exxfw0IVPYE8VCxvA5Dop9/Ah8zabLbGBTHMxDKy7jDb6bL9AV5DXpcTDOzRBOB+MOPMOSeXm28Mp80QPsq7zptOMOXuJmmGgwL0l/EJvAp2AsVJJqO9eJ5szvQk2hjsswjte4iyf4gPNBPi3JahCLmTRvipE4IfTT9CbPtB1TBs0/nMFRbM6my6jLDrEtTvyGJtXkWmTFfHHdk2JCF3+HCzibxHKj+zg3/6l0eaKEj+Y71UmOzHe/luRrpmp9/4K0Rf8NtfGPfAJyoSgMCZxLzgAAAABJRU5ErkJggg==>
++
++[image6]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAmwAAAATCAYAAAAtflEYAAAavklEQVR4Xu3c+69tV1UH8FGf9YFv+5DWnguIWlSQqm1B9EpQsIioPAxQpY0IFYIvEFAkpchLFA0oghqsNQixBKPWoI00bSAaDNEQYgiJMbmJP/iDf4TuT+ce7HHGnmuffbi3CLi/ycjee6655hxzvOdc65yIAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAzyB8YW/4DMYXrOjzemPB5St6YW8s+KIVfdOKLmrtXx677/t04CErevyKvqJfuECwxidO2l7c2iq+uDcUXLai63rjDjxiRS9Y0df2CzvwJSt6eG9c43ti8H8+cP/1rY1tXBVj7s8UXLKiH+iNC/juFf3xir66XzgB/Kr7xQxPieFHDwSMm2Pj3zp+fHN5L1y8op9a0WP7hc8SvCVGjDotqqx+YUWvjSGL0+A08j5f36vA5/NjP/uDr1zRL67oB1v7l8b+flJxdYz4++lA+uf54utXdKb8/vzyfQnpU/BVMfIpfG+M+LyEb13RDb3xlHjMis62Nnp/VuxXg4g7/+9BYa+P3UXQacDhvm9Ft8fpE4bi4Ir19zQszpe8fd2K7ozdAeVbVvT3vbHga1b0yt4Yo4j4u964BsfARyXFCv7MNaO/WNFD3dwg0JhLgDDOrSv6yxV9ZEX/s6L/WtGr4/SBdh+YVyLrbUvrhufEcgAUHOl538D9yyt6fwx57gv2+b6Y33NLDB7OBzOZPGxF/7ii29a/FXS/egL1YLLLNjrtA76xr6wFXzrNwliC6HMmVV/6wIqeHicnTTZb5Z6+2sf+k4X2pFlB8WMr+tD6e9pm189JOIoxxvNa+wzG5nczIkeFzy6+9en37aJ/iRGjduGuFb05dm+WZqiyunVF74jT+8dp5M1H2FbFTJ77bNDYnM3cSbJJ6EeWfQN6NGk7CXzqD1b0hH5hAn277y+R2DlD+mdiX/+sUEC5frT+LUaz+aU8bnOruEufYlts7Ndj3MNWxNMZ6ObGFX18/Xsfm2d/FeR2+4pe2tofFCMv7IM+5nfEiC+XtfbPaTxqRff1xvPAo2MolhJOG3AE6/fGqPzde/2K/jOO76IkFAlc4dVhZy5x/lMsn47YuZqnY1fhMjPQb47R//djOOffrsl3bT0wzwLZf8co1hgih8DDksN9qqjOLyErDHubIrG21d2fgok8FZgz0PUje2MMJ7eeStaqCFJ492tJs4Lk7hU9u7XR9e+2toou7+7sCXPOEtS3x1i39QuaPZAm4e3fY3t8tvFvsd1/JvsKRb5iv/dF7OW+Sbv+cBQjcL8oBu9PXf9WgPpE+Hry+rvr1Rd+OoY+Ja5dRZu11kIgT6czUf1abNbX2z+4oletf0to9aQudfrW9e/0yZl+dkGM+NiKvq1fmOAohiz+KIbcXrP+rs0mQTzpifgdsVm/2PAPMeLKg2P4zhti8H7tiv41xsmE3z5rXHBy3MdG4gibeuPkmnsSTuJtjlO3dI7/XA9/e1K5Ptv0dJxG3tZpPY8tbe7FR86JH2uvkCPyeqXnxob/Tv30R1F294q+obWz56PWtgvyxG0xeP5obJ8AdVjLu2JbL53okJ1U5FrSP32nv/RPa0//5Jv6zHIVGfPT15c2eeOZMQrPLm9w+qZYYgPmOBtj85wHJGSpbQnioHXJA7MDjCT2ljmt4roV/XMMH6hysuYuzx4XLorx5IxNf+P6N6gB1AuPW//+nAdjF1T7sfL5gDHV3T0IbjXInQbuq8qnLIaXQT3x1zGShCBJ2b8Z4zROcVChkGScmewEWHxlctiFykv2F7BBe17TNivYThr/gUYWJ+STDrHPujmJwCIo5AnhZTFkLFHNCi56qu1XruhtMe6r7Z3c3wuAStpdFwDOxfGirNqYdVZ7o5tZ4VWLWLbgtMj41rlP8Zy23QMUmfa2jpns8+Qg7WrpsaCTnyW4t/sgCLQ1GZvr+vIbrF0ioO8q2yXK8ej1D2Ps5J282ICwgVpU6OvUK4N7f/TvmkIl/TML2r7J6KfX9Zq+S4VtHwPomIwVH5KJUx7f6T8TQwd914Kty2QX1biQetoX+qddgHGsJcerxdatcZxPc/d78dL520Wz+M1e6imbU5o/K7/x0+0QX/jbB92/0meqLtmbdmtSFNRrNk2KmIvd3KC9FpyKkhfHiCu+z2CefQralP8MM73zTQVUjp1rqf7pEEPeowt+Yd3s/a4VvS42MVLBZF2Jk3SNH+Pxtyq7jDH18brisuI9MXz+LTFk1vWVoIfrWhsoSGeHLwny4M8vizG2glAhqzgFtYs8PwMeupw/q0FY98T2LuV8cKELNhX0Ta1NRc2YKxieXVeC8fTTGid3xstAzADfGGP3kYHgJ8r1jlng6MafNCvY7MR7gbKLLjTIQwBwAmHnn22KoNNCAZFH5PuAo3Hs0+DSGEEVrolNAMyinaPWXZ2de77HcT4Fm7772utSgLpQBVv26Uli19izgo3MnKBdUdok2mqjHd0ekxQ0xvE9ZeTzZ2IEfkVPJrxMPPfFdpLtc9PFL8XG/5bWvgsS2h0xCq5EFuAz5Bzdf3fpf9c1wL+Tg1mRUDFL3LtwoQu2e2P0zwIa1VO6pPSvXWsGpyB3xfFHXA9UwVZhXQoeMeF97Zr7ZnN9Z4zT3n4KW0+qLmnXwPx9AzEjBQq+Z5jpnW+y//RPvjnzkZrTxLPOP9gIVZ/hi4qiy2JsstmCWJz+bEw8OwFX8J2L8ZTI6TJ0W6pQsOGRfykou74gN515vxyUtkXOiq783U9SjWUD8KDSht+ML2qXLssEHpauXXBg/m9iCFdiYmAJlfhzYxPYCMujhN9b/6Zshck1MQzYGKpUJyWJDCp990EQknneI/jlPPvgWXE8WajO7ZjrznkJds395GAWsI9i855LogekGa6LYYwJRnzL+nsGAkUI2c9QDTH737D+Lokh37XNCjY8noYeCDD222P7hLJD8JU8c9dWd3pXxwjsEjNwRHZklzeDYMoOfyiOJ4JKs8c1ZObkFPBtjgw+xrtpfc1viaJiVrDNQF/dvvTNAMWmul5Q7mBnAQrOt2Bjl33OJTJGPZUUbD8Ww7/9doLwhBi2/WUx9Kbdo4hdu1uQwLr/W9cseEO+W5PxqhcVCXKtbfRaExakfLp+dsErFAqMCvwuJU9zSDrmwFN+LiUoqNesrVPGu96elDGOzfOrJRtLcg+f07/6SZftaQu2em9iJu+08RyrPhLDv0StSJB/FEFn1v3AoUDaYZ6KOK0hg4ev23fRI0t/mPmMdX1/DL/pvJMDSrD/l8TYWFxe2jusQ9GlaKkn7ebvBe0S2UAm+GeuKf0zf/NPvum1j/RPvimm8c+MeeZOOoqR4xUstb1SP7B4eYxik21+OIYczPeQOF4U3RvH7SJtyXq6bVailyvXfVPmYoc8Uu1HPzLoun5VbMdMMqj3dtigv7E3xrBt+qNn3/OEEBSmruHZe7a1LsriUv+KWW3ySXivzAKyijTInSv6jRgMMnQJ880xFHZ3jMcY2T8DQDVIgtOWux9O575q4BRGcVU41Vj3Qe4eGEzC911CTzCSrjBjPbG1pZLqc27ysr47YvvYFhglmSn0ko/6vgMeM/EpDP5q3Q6pRIZO0QyA3O+J0xVsPdB8OtCDiFM+tkSm/VqSR1gVNYg/JrYdVWF/Y2wndr+1u67fEsipJhMJgG17ZyGDjgLg5hjvm9jInIvNoxd6ZMsVvUBOu5LMBccEfc2CfNrrzJ4z2UEms5nddjktUYWx2U7KI+1yxuMSejImw2ti/u5g+rfvyU/arnjCrxRSFeauvtxlXclOPnlxT66jFmx44GOdN4/b2asE1q+hykP6rdjYgV86msE4CjYnHNfHdsHmXrZlDUk9lolHkln6jzEkxO5Xs03JEiRScytylmIw+dXTS8kpT3/EqbpJpovqY773GAUzW0sb7/E7YxoZ/nDMT6ROg2oTSzBXj6PuuzQGfwqseppafVM8kjeO1u3dVjs9LsZGJzeNYP59TtiS6qP7RI0fwHZnvsknZroXU21MfCbS/i8rbYkzMQrQHDflR17449+Kv8yzZJRPKiD9R/9aYL0wxpzir2vyRo2HF6+vo7wfTlOwXR0jb7Nn7xvOILd3u0k+uq2IafJLQmyRn/K1sJSPeyuM33m7H4wK41e29ltiOB+nz0TIIU1oQTVQMWAG16HAyEoaAzUxQBZsjOdTAeN6eWz+cCBBCFVhS5gJBT/kkcVoQr86nuvPiaFYCmCk9ZqCluOdjXGMTGlOmbLoq4Z8RQwjroqFNERI+XUnT+rB8KbYNp7/CyhWBKLToAZxgYFjsk8yMx5nI2OBsjrV09fXnf7eV9o7yKnaoeR3V4xg+TsxgofNCn09PkawuyGGjrJ4N0cFfqt9pN7SFjJ5WkNPUDVA4UvRUN/VuzY2BWINUBWzxJc2swvdL9Mue5Lo84FgTU6ZEKr96d9tFBkf+K7v5FptNzeLdbdurCVfTl3yKzqpvLgnZVKTc66x83YS5VhZWGozR38ZP1/AnxVP5law3RYjkRsTb+zPqcZsrT2WpQ30BFTpXBy38V1g9x9e0bv7hYau52pz+K58kk2d3/ceo2Bmt7m+Lgf99E8f6vpJUkj+7PqeCjZ1VH5Xm1jCkq2kHV8em3gE+O7rmUGfHKOjFi9HMS82ZqSfuJHgm/J06q2irwelbCv4qbyfa3zEit4e4/1Phwjs9ig7r6FekNN8Kq74eMJ3dibHIjG8y+vW2Oj/NTH856kxcrNr+iuajtZ9ajy0XnGp2o91vSi2NzRPinlccwJ2RwyfeEZs5+UaV2qbOU/KuZ5GnovN/Wlf7q2gsxlvnyyaCDgTBFKYVQdj7AKRAsXukDISDJ/COzBxd4xgZZxesMFPxkiuN8byex9L8MzdmI54K/A/c/iOmVCMZUxjV+g3G8/O9CUx5HJ23UbB1iMQuscRrVM4hW4iFZXQV2KuqIbIWeoxtaPVN5TfeZSdSKNP3eyimaNeCFwdx4PZvpgFcYHD7v9lMcZjf+TK8YDM7QJd57CzIFup26EgycbfEkMX7FawMc9V62u3x+aEuf81FX6rfdxavp+JwZc5yLmvTd+01yV9ZeHVA1TC9c5T9q0JoMMjRXYpkAA5Xh/bwU2g7uA/95ZP69KXv+eaKmZJapbInZI9pfw21sz3wH3GEMAlj1pU1MBakzNbqidsYt/b4vgfqPSiGSUPEg1bQ9oytnWdVUp7M44/QPDkgV6cFOE3fXC2VnGxxtvUa9dRJRuXbuNLMNZrY366UlFlC6ct2PCUNpLE9jIpJ0mks3fY3Jtyom8nKe+Msamq9/9HzP+wja13nqrdzWAuc9bxJf9qx/7aU8wAT0a6f88w84UZ8Jy+eRKeFcfH5JMe8aZ/Jv/8s+fHKttEnrq+OIa/PDlG8cZ2XQM6kPvkuwS7tgnmw/fFOFTJufmazdXjYvgr3TnQqKi2lLLEl7ab1tdtzo2zFA/r+qxr5guu9/sSF8XmFTE5oT/utTnMwxdIPmYFG786iiGj+2Ic8OS8aV89Vs5qk/uRL8Z35+i4PIaAOZ2JLSiRSaaD8aYRCH6O0/MYtMJYZ1b02zEWwzj2BcV1Q0vlnrSmmVCs8abWBrNAWsGYyaAnTbgzxjUFRiIVtQvVEO0c6m7qg7H5tx5J+kAW4a+MeUKsmDkqODFQZOSYp8FRDDlas+RWeUwSpD8W8+BWE4ETNAFBorgmhq0IjgLHbes+ibTJk2SbSX4JTpfq49GEYs2aXhrbj2PxW+2j29XzYxR+eOtr1jftFV9dH5koYSlA8a26u05cGvMT4wR/vCfG/xiytl10LjabEsBXvqhcEznkmipmSeok+wRjLfle6lJQvHj9O3mxiZHEYFdy1t79tuuggqzof4mv2doTxlSw+ayU8y2NWZE2kElwRrOCTdHd+yHFEXvv7ejIjTHi/5ti+KJPPsx/37X+LhaJSenv7MWJzwvdHMt6rr6eyPV1OfRYZXPx5tj8oRCIDYqBjoti+C0fTuAp15IkRltrYhZL3FdtQxHilZYbYvQ9W64l6LX7U6euL7glRo5OmfTi1rgJ8mHzCb6p2KvxI9HlW2XrxJhM830rvy+JIUPxxLtV7OCd9985cCa2/6/c3bF5v/NsjJyQ8k99yPcd6T/4q2u9PjZ1hOsKw6V4WNdnXXTTfY7e+n0dNkt/HqNGqpBfay2TfHRbYYv+8CJrGrrgBzlv2lePF/pNectHPHYsS9BH8v5AjMc7dkU1kS8VbPql4JKx7pwVlOj0bma4S5glON+7Qc4wE4qxelEpETBg/C3BO0+fiPn6BC7yubm0zQJBhzUIpHZ0eOJ0SfX9tqTciR3FeHdOsloKlIkeBBOcAs+3x3bhsgv4NB/nFFyWdLDLHrKdvG+MscPLHd0zY6zd6eISXzl2LxKTBOklG1PYKNjIVt8KRYEk1XeEgF/BaRZIK/DW11wDFL766c61sfuRKDkJIAr1GSRvPM1wU2xeKWDnHgkbq7//JBmTRy38BFABVyHA/qqN4U/ArwHSqX23syX7TDlKAvjB2wzuq7rM5OTT6UL6hD59joRNX49/3Sdmp5TWOLPv1OcMxnx/HPdblPPNxux6TRvodl3pXCzbeEe3pxnITjw4LWWMcxrRnwLALAaw536qCL2oAElXXlK85dORPgeY+30xbDDH3WUTiVmcdl+347QP88/k3otlsdFjvtrWfY7MnOTUwqTLqurNBr3aDt/Ulv5ZwTfJrvpmtXmxLuXk+4NjbGqcKt8RY/OsXUF3pvRN0IH8r59rCtr6ZM51dnpSwQbkcGWMWEBfZOyAxGNvhdjMfuv91jXTiev9vg58yhfdBpwyqptS76mf2i/1V/Wa/Oe8aV89XjhZXeTtbGwH4wqPKAT9Z8fmhUJFSAqEMDhnVRplahMMIYsehpr9LPbS9feEhD8T7hL07cGVczrd64FPkVl3AYTXhTILIHkKWUGgFdbJ+PpRPJky8j9dfwosMAsECfdwMkUDGfqsOyeYGWkCDwoLCWspISaWCrY7YxNw+7Ul0LF76Nk9xu46SOT6u6wh26+N4/8PzD1kfC7GcXsPEokcuyexJA44szHj3RhjVySAsvkKbdZn09J9Bb93xyYB24XOkHKpqAEqfakTHUIGhqp7u1YBZAn0IXhe3S/E5n08wQXwZ5NgDeTBj8n6tth+CZevsmkFtf7VxvDX14CqLSnCXxEbfVbgN+9h/0voBVuCfl4V4x9O05t1zCCYSuTpl4lu9zast8TxxyDWOLPv1OcMxnxPb4zNfLMx3x6bv3iEtAH9l8hf3s/kMkO3p31AvtfExgd90qEE2mW5C0sxYIaMVR4j31zaFeUKAnZiIzeDmGijVzcvF7JgS9wbJ48J1rI0RsImgh9A6rzLquqt2w7ftN70z4rul6jbfOKeGNdtJC8t7WxAXHICdVlpT+RJnFwiBtUNNh2413vel5d2SP9xCGLzbG66czJt82ZNYtRvxPhr3Zn9ZjwF6+prTer3/Ugct98s9G8vbZA2l8VY1jdyQKL6aYKPnIvNvPqoVcg4QU7G6rwdg0SVBQLCJIFxxHNx/Jg332dTuEEmGUd/EqrvPrvyr4vj/+uFYJ4RxwXoufFpsFRw4C3HVHCZC39+pyJnBRvhCcwVdhZVEfCi2Pw7EkQe1fAuifGI17U0ALIk15TPfXG8kBCEJEVrqU6vsGXglWaPMa6PMRdHeN79dw7d5FycthOHmMmPMypM7NBmpwv7oBcxlT4Q4+XgHoCAc9KfjQJd4c8a6A/IUWJgr7nTrpgF2Yqe5Mn8V2JTfCQ4I3lqwytZmJuv6FsLGLKvybxCscBn3HsmttfMBmuA2YVesLG5u9btu3BFjMBJjleVdjLMUyj8SxJPixEYrTFtR586R77Tx1deHqOf5PK62LbVSmdj6OeyOP7Csg1QzvVbsV1km4vdCGQVXZfWpgBlQ7lZzJOXait08e4Y/eomLmEtj4rB65Ux5NHjAh0oOp0G6ZekaOini7nhStvMuJGUPqjwNl7Fh2Lzb270ocs+fiexiY/UuZdQ7WkXjKVw5QviNBl2iHv8VJy7JuZ9Kk5TsN0VQ4/0xaceuqJXx+BHjH5nDFkqzqpvKhzoWTzhz35nnjL31bEtPwQ+8djtsRYf2d8p1FvjeMKvf4xSycFFP2FLenRsTg7FHEi/f0Ec5zH5sGnrSZ+94iX9k28+Lbbnq3Q25jA/Ock7xmJfP3+sx3HQj0OdczFs+k0x/r0FvsRTdpSbXr7GF53WwSweGu9sbPTKzr4rNgVPt1/3m8ujSIVm+kIlMuarvmfsVvPcERv7sE5xxPwVF8XYEL50/R3ENDHWfXz2KMbY6ePs9OEx7Ljyq4+4ln3Ihz77mrZAgJx76VHTErJgA/diYJZAslrNQJrIgEe4XTAnYalgy7X0YHVTLD9ega58Bs8JVfMdeJXIGESFQP/hGEFCcq9wz1EMZ3pPbAwDZZHVQZbZZxeRA0Pm6IwR6OZcbL+rkfSumMuPDOiKEX6qoBtG3edEApZTwLPZeQ3yYbz4EXg/ESM5PSy2gz/ZM+5eULq3F2wc0W5O0rdpqI81yUxweWZs25/+iprnxCbA+Lw5hkx32VICf1VPEkcFWfcANcPbYlPoshXjki872weKi5fECJDew7KO22P438/F4I09vj/Guzyu21Gz4bRTsrCztIaPxtABvZyJkRhmxUilXKex+UmFsV4RIymQ+4yev+5LV12Xgi4+BVz8VCgIyYrM2Id1KzrYxQxkVPlWKDziWI+hN2NZU19nJ/eD/k4KMmkkpQ+y+X6vJJDvwPRr+1DOXSE+0CMZkpmkugvsnN2JazbZtSjpYA9ke25FP3r80hZOU7Cx/6P1dwnR2u6Lzeks31UgacfrbTFszcaDDWf88CmevHbdd0YfX/edxZKOGsPr5gHIvo99ErEnMUmMTDtmtwq5o/XvhBhNhx+J43GAf+ZGLP3TOsilz9fnrnhijHHzOh/nBxkLZ7gqxkZd4e470I1Y8t4YMaTGWUWMNdDvg2K/eCivu8dY5J82kHC/jdZJ8Sip683cCtxd6+SrfNOBUMK62EwWgJD1za710NFJfeJ/AVQnus3VbgQ7AAAAAElFTkSuQmCC>
++
++[image7]: <data:image/png;base64,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>
++
++[image8]: <data:image/png;base64,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>
++
++[image9]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAYMAAAAWCAYAAAAiuPBWAAAR20lEQVR4Xu2d2a9lVRHGyxlnHOlWWg6DRNsZVGgQuQ2ILYMDGAZBBYXQGJzAIaIoraiMDqBGBGSIaNuiQTEqEQLRaOBBY4zxxZd+48E/AtfPOtWndu1ae+9z7rkXiftLKuectae1alXVV6vWvt0iI0aMGDFixIgRI0aMGDFixIgRI0a08PIiVxR5rWt7YpEnu9+G5xd5emx8nIKxfKXIE+KB/yEwB+cW+VmRzeFYhvfKcsazt9Tv86ki+8XGxxCfLPKS2NiDg4t8XdTmsfVl44wih4rq8KlFDmoe7gTnHyt5vw4scmpsXAe8tMiLY2PBWUWOL/KcIk8Lx7qwociJkl9D2xtiYwdeLW17PEHy+PV4xtlFnhkbCy4QnYel4BVFHijyZtf2giJ3FvlckPuL3CYaSIfAghmTvwycUuRjRfaJBxYAY/xtkRfFA48B0BM63VTk/CLXFHmwyMPT7+j+g0X2mp5fA0Fxa2wMIEDtX+TqIp8OxwD9gHwuFQ1MEccV+VuRQ+KBHvDc00UD4yXSti2EAL3RLgh4YZFXxsaCfxb5QZHnxQMdYM7vFQ3aWdCN4LnYi4FrThbVY4Y7RP3H7B6/WdlztBsQ8Q7Jk663F3m0yFPigTXGxUX+WuQY14Ytfq/IX0TH+Q2ZEeAQYEd3SXtOX1/ka0WeG9preL+oXvw80oYtPcu11fCkIs+OjQNAXMvIbCjo25elnuS9pcjL3O9rZfY8gj8x4xlFvl/kHjtptYAMfjf9JPMAFigjviSq6AgMA9ZiAB50lA7X0BWIMYroEDw7u+dninw0tPWhNkYm6X3Tz8cCjC/TMYCwo7N9VpoBlev5/HaRf4uOg3n5sbQzqAwYHeM3cO0uaQduE47tlOZcQiKmv1vdd4+jpZ3RM+4uwiNAEPh9YCYYYbvzwObe2yvBpOvZGbaJ6hgwFu7H/FwnzUDxLlGSt7k7SZrBCzu3Z0MyBr8S5/vPRTPBPrBaivPUJb8QJZm7JU/cSA6ir75NlCDIzAEBFRLcvueMHJ7IuPZb7jf6I2EA6I8VRxcOEE1kI9AzgZb+9AV6C6geVEu8TdEvb3OAWFjDslYl54kGeuae50FcJMMr0+NHic7N0OS8ireKGgIZ4j/c54rMnCUaza+lHqhQakYGbxQN1vFeCM97956zm+BeZA8eNTIgcyFIRLC8rTkGxvL3pN0cg6ynzxgXAROKw8fnmvyhyI+S9iuL/EvamT8BEpLwS0jKH4zPlvboMtNbBlYiFrzpK9diC9EZDBgpz4okBbg+Cw7mgGRvHp8PvzPsLnKm+03WHUmlD54MCMqLOi9OCMkCsmb6gRghZ4K+IBAc3Z5LoP3J9Njt7ryHREkd4PgkbXGslsB5MH/Zqm4REJQhPcAc4698Xlbk+ulxA/pkLBPRbD2zCXw46gRh7n9a5IvT3z8UHf8RelkKdEgfMhDffLUDXb9TtG8e6OmboQ37WA0ZLAsT0SSCvvM8/Jp4Sl/QLSVbdOCBPc+7at9jiAzaVgaGWtZcWxmAGhkQpMh6XhWOgfuknq1mE1AjA9prk4Nj8PyY9WVjJHhldbllA91DNJmzdK0MamDudorWwgHXk+XtO/09lAw4vnn6HSfHSSDkPjKo6Z7A8LrYKPqcm6RpL+gewuvDLdLMni1z6gNOf5pooLFE4DuiwZZV5aKEgF1hYx8QHQP7NnH+on9FoFvIwJ9jhEk5gvuyv8V9KN9ZAEVfJAh987oakL1bwLfVyUGiZbYsaUEg6CxxAegm9jfTD+cx17XM3sqZrFAgqNiHKLZS5lkR0X5XuzJYLbCp2H8ScT4hTfS7RdTnWYVm48xW471YJhngXL5jPgBNpp8GnBNjxtAzZBOwCBkAHJ3Via9DZmPE8DHwbLNsvZCRQd8GnQULVjOcR7CzoA6GkAHERC3SCIoy3Z9FM1ICJ/eMBmpGWtP9myQ3SnRPFujrxUYQfcBRyH4MXeNi3n2p0UoU2DrlpZi8dAFiI9vMCPww0cBnASrOX/SviC4yoI/YJaS3vzsObBxrBStLGN4jWpYh639UmuPsSgo85iGDrrmFBCAcSJh5zuzM4AktQ+w3fVkvMqDfWYnbxsPY8LOvTr8bDi/yG5nFVbOXaHtzwZMBS5INogPH+CKoVx4ZG6egM9G5/GRiWGyOGQgUE/c7IpuAmoHQHpd6GQhqVoqIZEAGzKbfeiMaVZxQm+RjXZuBMpgFZTJGxgYhXDFtY6lNG2Oj/HSZO98yCKsFbxPVD3rHOK3uze++2ivnxTmxLJJn0Yffi/YRYGsEPz+/ZGOZzRF8IcMsc6fvXcbPcw4NbUacBDM20G3l6glmXse6SHTz/ypR/4kZs5VhbU52SJOk+sjgEsnHb767FjhANAPFDujzTtFSLEGKOMH3GhmcILNVagTXeDuM+jFBh5mvA4iA4Iid+z6cJO29DcA4eGamQxB9kNWst80sFsVrMju1ObRz57Er7scq81rR+3IP/Axf4h7sFfLWlZXCKB8yzhiD5wIG9aciv5IZe+IYOEgNG6VZjwN9ZAB8yWC71Nma539C2tkoBhKDmjecPqDAzdPvngz2FQ0QNuH060Jpv+mwFohGFY3FB4UMsTYc7wf8ysCTv4fVznHim2W2kUgWyPm3ixqi17vJLtFgxhs/BhzWNldtDCvT31uK3DhtN2Abd0l/ludBQpGVoQw8J46TYEFGBRmwUU6Qi5jHaSGXo4qcI5rccG28LtO3RxcZsPlMn7HFuCpZBhlASth/BM86W5SI8PfbRH0H36A/9M2THitEK2U8IvXNaHQTA3ymH86L8cMA6dJnbN3rmhVAlmX/UWYb3Rmiz+AvPvkZQgYZuAeJFLEOzGNXxB/0bzHSnodvkNzhpyRQnAOwj3ulrcfBOFGUBHgr4DWiioyOHsVqVizRvHEy0K4yEThj+mlK6kJkWVAzEJyajScPnhH77sXqxnxnE9CyaYRMiGBBmWStYQ5kAtl5J4P4aKuRQYQ3UisrDCEDA6/14fQGdE75hrIO11jQsgBm53xIZvaAAV8t+goqMCegHyQZHIukju3QxorlQdEyVR9wMl4ptfJPBM+LG66QFGRgZSJKH6YnVlqUCL3TRluLQBdbZPa3BMsmg5OnvyFl/NP7RI0MIKghdXRkl+g9apk8wOcJOswv85IFNb8y6EKm00w/NV8HK9PPSAb4PIlMxK3SnWDEfnNPX75elAwgzXtl9pJMprcMG6RZEuTZ3o43TT9ZfUPWJIQrMnz/rAEckrdsIIJTZTYZKIxj3rksAERlRDDQGLDiZOL8PIOMjo7Piy4DyVA7D4MmGJC5niJt0llPRKOKxuIDaYb4ppaRy+WiY8TJCSSmty4yYHWwNbQRCC6XWbCqkYHvMzX0D8vsDa84BgJn7Q+LOOcW6S5LAStDQTxkUdiWdyBAn6Ld8iojyYO9TcR9uI5Ax9sZEJh3WsimFkhopyznsSgZ/FKapRLG45MAnkVQY74N+BGr+gwEiFq/5wF6YUWdlT/8OOchA8bmbXaeMhFB0ZKOSAbgYmlew7nnud8ZfL85n0TRY1EyIFsnoWSeQKa3DPihBwnMO6bf/cqZWL1DVCeMm1J5rBTMhRgcGDSOYmwWyQDnM+fxqJEBHSfbIigdLlpu2Cltx/XgWZAFg/XoIoMvSP+bQPT5AtEsdJPoOFEuxm4Ttt4YujLoMqDjZfaHNxgpc+b/YAVDMeON823YLGq4N4i+Jmmb7fSFeR1KBlxH6cEMH0QyyMDbZmRS50i/o20UtQ/m0oPV7S6Z/QEa9/G2QrZHImA27vtDfRZyoQ/RaVkt4XS+zo8tsXn5sGsDXOvnLwa7K6WdiZsu/ZxkOqMkdp/7zTEIfy2An6NfKgD09zZRu8CfrW9+nL5MRJJFIhADKMjKXZk9DkFGBtxnu/s9kX5S9PbGSpG9JA/0zNgZzyGivtVno9gac+0DdLQrj7i6tWuwV153B9yT5MxXQYhb9OVB6S6FDUIMDhjcA+43nxggbMlEU0LBQHAeDwbKJucBoqsNNnhwAq7B0Qm6BAqM/gpps5+HOWtEFxmgEAy4C1tFiWiDNJ/B75ulnxAIBgShc6X+FtS8iIYRjYWxosu4R2NgzNeLlrrIENADxn+t6DxgVBikJ/fM+XDQLFu/UZS4LXMl+PGJPfCd+SUoxHFkZHC0NIOkCU6DTd0huYN7YEdc44O+BxvVE2k+34BjMc5IBqwO0B/2AaLTch0lRYKjD2Qr0rZTro39z/TtMZQMbFVt4Fh8/rLAOM8uslvapbaoH8C89QXIGrr0E8fskdkKuiT5MZAk9cH6ve/0eyQP7vmok/ulf6y2oevjZKY3w5GxQdS38WMICmS+i+2SYBMD+uJfL+IDWFKRicLgdhxDzVge4Jyce7rM6uyWacfAvU30D0kQc7wMi5JBH+4UDRQgPmOz6OT55XDEFtExcl1NH6tFZiw45nGSb8iRDTB/9B+YHghg7AVhlHdJk9yjQUVA1KzmCDbYgw9W9mltgP7GPmdkwP1qf19hoOxixJWBAEVpxMYbgXNwfz4hbgOkeOb0eyQD+g7B2NxHpzXCxT58YNwubTtdSzKIWJH285cJ9LFPaEOv+0nbTrvI4CxpJwBesjKRyS7R1U8WLDMyQG8Wu7ADSn994D7Ypdn6ENTGaiBxIIHy+ot25ZHNM0nYLaKJ10TUN2JCYmNccW0LwwcHJnqnaKA2Ru0jA7IzJozAs1GaHY2B+25RJ+b+THAtKMRAbVgNGWBMML8hewbnkCEeKvnKxTIEMti+mnYfIEtIMxo/RBzLDGyqsvTmuREcJ0CaLk0P9golmcl1MssaMjJgrJAH90EnN4i+U89yGINcDRnQv8tk+CY4trQlNjrwZkgWGCImoudmiGSAs/lsMHNaCAqbNb3Ziiva0HqSAc+Jz18L4NfYBqUfNrQz/XSRASWQriSrTz81ZGTgsbdo+bgP3Aefnyezro3V8IC0/wWFTG+GrnlGd9yPGEB8stgMiGmUN3dI+5/vGQycnKDMRh8GRcZzozSzTwbDmxe7RTebfYCidpUFZQ8L3DjaVeEYwYvSwCNFviuzjB1kgRrMSwZkt/STccTgXnsGBoHho3xe64uEdY20l5HLRM1YAH05ffoJ6AdCeeck0fn0esCIaPPIyABwT68j7IMgCTIyIAkgkwJdZAAInPwpfWasR4hu6FIGo14PGeDEHvTtGMnJENA/xkmiwfeJaODCSTLYWx44oE8Q8AHuQ2Z5n7TH5IGdQLLRhhh3JPOY+ZJQkOWRjQL63LeBDLBn9oc4n9cKSa44z8CcfESazx4q9gYdPmn2hS4gwBgkbW79OP2ewU2igYsxDvGVzB774APrJdIeD4INMEf22/rl59zuE6/tkyslLxVjO6zEY9wAe4nq5B7ROTQhuUEH2K8H9niptP/Zlo2iMQ39W2mX52Iv2BoxfW4wKJTDBhmGNGkcVRBQYM2PizoIwRujYfOsDyh5k+iAJs1D/wUDgSQ4x+MU0X7FCWDwDBgHiMcwRA8miiBT21SukYGBbCZO6OGSB7R5cJq0++4lWxmYsELAWXklmL554sZwMDSrLzJvWTCrkYEHzs982/0nosGKa1j2ml4OFDVsDDCWdnAy6p1DwF4Sb8kw5xdIU+/05cKpxKDkAeGwmsE2LagRzDIwDoJczMZ47v6i/dgtOt9doD+c78G4M713wZOtwYJU7CO6Ymw2xriXlCVKiwJ9RGIGPhAvA5T9avsCNfg+ZK+hD4XdZ15wjdc1iRSr8B3S/S8YbBHd7DU7NSGxMvtmLFQNGJsvMxm4P7Et+sNG0YTpIVng31XjZoeJDsqCyDJBFnuq1ANyDSjjqNjYA4JlxtQ1UBKLjLseIGgNyZYWAcEbB0YPJ0hOwGSU6CrbfDUQVPdzvzE+gk7mcOxZEMBXS5LYIklJNPDzpf7vV2WAVMgIrW6c4WDRN8omod1ADZbMKyYDQ4AvkTzNA5yY5Mo7MFkkDg9RRLBKulma/wfJeoIxsuKed5w1kGVPYmMP6AMB0zLjRcF9eEFjXlwkzdc4t4u+Mr2IzUTUCJ1EADvZFg844D9zE8GIESNGjBgxYsSIESP+n/EfOm2hr/fOKksAAAAASUVORK5CYII=>
++
++[image10]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFcAAAAZCAYAAABEmrJwAAADk0lEQVR4Xu2Yy6tNcRTHl0fII68UCscrz1LKgNAV8ogSEspAKMo7I++LwgAhUgxkQqQ8ymNgpJSBqQzNDPwR1/q09mr/7rLv6ezTObpH+1PfOuf323vttdZev/X7nSNSUVFRUVHxnzE+02jVgDBXUR/P3cg44VyIAxWlWC51ctjXxGDV4jjYIcyMA22kqeSuVf2Ogx3AZNVH1bA40SZKJ5fee071M4x3Aivk3xZF6eTOVn1VXYsT/Ryq9b7qU5xoIw0nlxNDT9B7sR2xvxP9RgTebhpO7kCxRF5VfRe7sVOOaPi9USypx1XjxDblVjMkfG84uTBK9UT1TjUhzPV3Dor1W/puqxmj+qU6GcZLJXeu6ptYvx0U5upxVHUmDjYBdpphuOqBWL/lxNAO3qq6wlip5JIgWsKiMF6PmlilLwzjZamJ2WmGpWJVS/W2i4diLzGlVHJjS1gnvfsM49xDZa9UTVO9Uf1QPVYdyK6bpLqRXXtatSEbn6h6qdqpuq66LWbjpuR2sEH/L0NsCfjGs5xLYs/DnxPZXLfqtWqV6qzqhWq35HsMMVzJ7rkrf7cEKJVcjmC3JE/oMckfRpu4LBY4zngb4KE479fh+DMxp+GL5Mtpm5h9jkwklaXmuJ0iqMynktuMYO+zWPUDL21s9hl//D58P6zaoZoqViSvsrnVYq3FqzONYYZYoUVKJ9fH5kvvTc37GgZrqhHZONW+JfsMVEbqJMe5mtgL6xKrFiqMl8EzwDfS1E4K9nqk742W5PqxkT9SvIK9IKZk2q/ap1qWXfs8uZbq98LCtzQG2mQt+5xSKrkY5fjFW0+XJseaTaoFqjligfg5kuXEbjpUNUvsBVFpQHBUJPO+0aROO1SF28FGEdiixfAjpwhskrC0jfEdX4vgRXofZb/gOiqUFcX/KmkMVHgag1MquX1BQCzvzWJnyDuSP8hPFmtUS8SS5BsilUnieDEE4MmOMOZ2sFEEz+UMTpCN4qvNoQCoXk+Y+7JLLCaK6ohYlaYxELvHkNKS5OJkt2qv6p7kbxUeqQ6ptopV/naxzYPN4ZTqvNgRi8BITNE5lDG34707sl5sSZdlnliV7lFdVE0X8yNtCf58/GRl4kMaA3uBx5DSkuQ69LMYPImPy5zv/icy/TRtMfF+p8iOQ/WwhIv6bSNQkdE2/0WkvjCftpQ0Bq4rOsHUTe6HTBw5eFhF43juOFFV/Av+AFjym+KCpgedAAAAAElFTkSuQmCC>
++
++[image11]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAZCAYAAAAxFw7TAAABXUlEQVR4Xu2TvyuFURjHv35kEPnVpXSHN6VsShkMlJsipUwWibIYKQNJBiWbTcpmUTYp18BkMjDIZrH7I/h+e87rvZ5X773XXW7xqU+633Pe45znPAf45+8R0S16Tm/C3x26HZyjHfHkSsjRSbpE3+hq+C2XaZG+0IUwv2LG6DXsH5SSp7f03eVlWaOHtMnlrfSUfrg8k356R4f9AJmB7e7ZD2QxDvuo0+URvYLVsPB9KBsdV0fqoz10hE7RJ3pAe5Op5VGNTmALxq2ittHtztKGZOoXyqZ9GBPRe/ro8jb6CiuHp5te+jBGu9Hudl3eEvI9l2fSTs9gH/oj6OaVr5RkzbB6H8NaLMUQ7KgPdNCNjcIW1AsS6k+10ASsDD8eeRH20QXSN+kXHIC9a7XWPt0MeVVESN61nqCYh5WpC+lXVTW6qCNYHbXjmlH/bcA6Y92N/Rotqu5o9AP1yycbmjbZOTH1FQAAAABJRU5ErkJggg==>
++
++[image12]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA4AAAAaCAYAAACHD21cAAAAsUlEQVR4XmNgGAWDELAAcSWROBGI+SDaGBhikTlQ4A7Ei4CYF00cLsYOxB2ocgyMQFwLxEVo4iDQD8RsIIYSEDehyoFNBJkMshUdwA3zBuJAJAkQ0ADis0CsgCYOAgHoAsgAZNN/Bkz/4QUCQLyaAaKRJABz5mF0CUIA5AeQbaDAIRrAogGkEVtU4ATI/sMWFVgBFxCnMEA0rQJiSVRpTCAExJsZIBrQMch2kCtGAV0AAI7WILBqyJIIAAAAAElFTkSuQmCC>
++
++[image13]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAWCAYAAAD0OH0aAAAA50lEQVR4XmNgGAU0BmpAXIkHYwBRIHbEg7ECRiDmBWImdAlcIBGIHwOxJZIYOxC3ATE3khgYcADxNCA+CcSqSOIaQHwWiJmRxMBACoj3AvEiBoizYCAAiP8j8eGgiAEi4Y4kJgDEq4F4G5IYHIBMPgzECkhi+kB8DYg7kMTgAOT22UDMhSQWywCxFUTbAbEEkhxYYgYDQgModCYB8QMgNgXiiQwQf4IByK3PgfguEK8C4mogDmOAmHoBiKczoJkOCrp+BkjQCgKxMJIcGxofDEBBl4EuiAvAgg6UlogCILdtYcASk9gAAAfNIuGi2JhhAAAAAElFTkSuQmCC>
++
++[image14]: <data:image/png;base64,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>
++
++[image15]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADMAAAAZCAYAAACclhZ6AAACjklEQVR4Xu2Wy6uNURjGH5eQ+7WQy1aUiSQhuRQpSsoAIQbkRJSBkGsOJaQo5VISyYiSywADGRiZSTJWBgb+CJ5f71pnf2f1DQwOvq391K+99rq/73rf9S2pq6666up/1HJzzjw1r81Vc7LCLDOor3fD1TJrzAXzymxM/2GT+WEumdGpf0foiDldVlpnzU9z3Awp2hqpkeaOWV82WLsVxrw0E4u2RmqVIpzGlA3WG0XbzrKhqTqg8H6poQpDCDHKjVcOMYyZZGaa1WabeWFWqINus+nmrfmk9nV8zXw3Nyv9quKUtpq5ZcO/Vs6Xh0X9hlRfF17zzDvF2MaoGmLlTbbEfFWEXkcoh9gHhberypdCeR2fMA/MYdXn0nnzXPHRPWrOmO3pf6+5rP4OGmxumIuK/oxHUxRje831VH9P8ZGvVTXEqtfyMMUEGMPpoZZigfmKb88tMyK1VdVSbPiZmZrqPpu1CuMxZGWq5/8uxeuCMsbcVax50IxLZaKHi+ib4vlVq1OKDfNcwYCs0pjhCs8tUJzUfbOlr3dbjMMATqaaT3ieOVDLLEzlOYrcQ7wucAIvkWlmcaofb56YUYpxdTn8W8IzhAenQTggFmNRjKy7zXao7V1EKJN/KDtprJmheOBywoiN8jbEQE4cI9j4ZsV8iDHZKQMivMRlsUxh6CLzXu3Qyd7NIiwIT9RSbHidwkDClf5smk8C4T5bMf8XszS1Y/QEc0gDbMwVxWb3KjbBpj6q/Uh9rP4hxoZzCLMhvNyjGIuRnAzhTu48MscUc942+80+ReLzCslOGTARblwWJGwWebQnlQmRals1FxFGVNuZL+cBfXN48pvL5Zg/psmKk8oLd7TwWL4c/rp+ATgCZOw3z0PtAAAAAElFTkSuQmCC>
++
++[image16]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASYAAAAZCAYAAACcn4MWAAAJmElEQVR4Xu2c96scVRTHjz323hOzsWGv2AsvKrYgVhKsWWM0BnuPiNiTWFDEgmA0eWKJDdSABRWCguAPioiI4C8P/CE/+Efo/eTMeXP27r7Z2c3svpfM/cLhZWbuzs793nO+554zqyIJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJ67FldDwtOk5I2M79e/PouCc0gi0J9kGwr7O/jwR7OLNLgu1sgxNqjTOj48ei44R6AxF63h0fFh33hD2DzQ52fbCxYDdlx9j8YF8F+yPY3Gx8Qn2RhCmhCJUKk+G0YF+KCpXH9GDfBfs3Op9QPyRhSijCQITp1mDLg20RnefL3gz2X3Q+oX5IwpRQhMqFab9g3wc7Nr4QcKHobun3+EJNsYvkTWCaezu4a4DF2U3aG8WGXYPtntnW0bWpjl6ECV4m4qBuqAsXlQvTWaLiQ9B5NIKtEe0xndN6qXagB8eu8ZdgxwRbLPqy4O9gH4pydUB2bq1ov+42acUFwZaJvlR4UZTXbd3100U/b/Z2sHnBvnHnThkfPXyUFaZzg60LdrU7t5koH3u5c3VAERcfy6bFR+XCRBlH0O0tmslPCHZesF+DLZWNk7yDJG/il7Gz9WMTAtK555/B3hPlBwc7VVSERoO9lI0lOz4qrX05RB9H9A7KPR6UvHxmB4XorQ32j2gyoOf3vuiOdk42ZrJQVph4q8vc6VsamAc9zB3duaqB7041FHHxjgyOD7ggEQ4TlQoTN3tDVJjsJwKQydu4i0WDLwbnhj3pXlG1MBng6X7JecHJ2NGMiYqUwXZYBsQKEfLBjVj9KLrb8uB52Im9HuyIYKuCzfAD+gT38juy2K7Jh3ZEGWEi0Ag4hJQWgeEkUY46+VNVmIrCVMQFyWtQfFQtTDuJ6kFRYiwjTNuIasztwWZG11rQEA0OShQP6mKCgzIvBj2Uz+OTNQFiM+KOcQBEHPOBgVMUvTCgP4WzwjsL6IGzXieaaVeKClUnsLNlLcpioej3ghHR3R/g+ygtLsuOJ0IZYWIuzIndo3fiphTzUQXiN8qAJFsG8OL7f92sKEA9irioUjhiwAX9YY87pTwfHm+JVk9sYBCfidBNmLjO98PzomC/SbtPjYOBkIR6e0Ak5zs5X50BJ57MiYSJMZ12TC9Inj1ZqE7CBBCLG4L9JLrTicH6WOloILjuES3JY/Big4wH+F7etPIW1kCJ2XDHnRA7USff4J5jorsCg71cYfcwSMQ8NoIdFZ0bJijRx6SVC2BcDKqMA3BxuTtuiJaP/fLBWm+oMJFILRkC7knctMG23Z3UG2fifNOdI7joR1FieKc2sMsi+OilXBXsiWArREufE4M9Huxd0TILEHxniE6Yh3xGtIFs4PPLsmuUGa+Kqm0Z3Cf6/GVtbP2nuoOx/QgTTsIOyC+sF6YjpTXjs0tibdi1jkr+6/tpouLDOa7Bzx7ZNX6lX6Y0aIjukn2/qwzKCNMa0dLWz8VerpD86KGZgBwqrev7lOj64kdLRP3M5oOoco5gny/aUH5F1B9nZWPsvjNFXy58IVoG3yz5TnGYYDcbcwGMC+YGHwAuzN+NC/N35kgSelq0FDpONMFtL8qHcYH/MRZ4YTIu/hLlox8uWKMNFSaA/wLGcr+V7to4+CCB8XOwQ6JrqDyBRa8EQMCFor0YHK1TKce140XJIdMDFJrvoDSxh7F7Enyrg+2THftF5C9CaIGP0HV6zmGjX2FiYf0xwHFNmLhu92WH9Fn210o66nL/ypn1QQQM9KsQrDIgCZG5Ov08pAhlhIn7ei4IPhITc6dUJPngE6wvfuLXF6FkfQlMOMFPcGR8b3k2/vBgC0R7bhdJa5lrwmS4V8oJ9aAAv7Ff8DzGBbte+DAuzN+NC/N3H3P4DGPhA17gw7j4RHI+4MLvmODiSemfj6qEyXCyqO/79RvHtaIkfSTtb95iYTpQNCMTAKg5zhZjRJRkMp19jiD4VJRQezNluzO+18YBX4uTQUBDNABZAAK1X2KrAK/24YTnt6xzsOhbtG8lb+ZxDcdjrImJ7Zjsd0/MA/4JZDIgGRTOR0Qb0c+Jfpam4yrRz94oOXBOX8rhwA9Ie1P/aGnnDCeF0176U6CMMDFnkhL+AuaI9hJM0J8VdWDWF2tIvr4EJTuCEVFfIRAAPsUYgtPAnM7P/hq8MFk1MJnAtz0XPCt8GBechw/jAjQk58L8nbngH7bL8skdGBcImPHhhcm48D1EfJlqJfYXs+n50PWoUpjYiKyW/M12z2hI+4MyOSbJFhPFjsFrUbIEzhQTQkCg9EyAgPbBQelIYBLc9oM0AtwrPdc6fefGBOaL05kA87dosTsBruAYvuCRYIazRX7QBGhIf2Uc6CZMrDmJB9+g9PQ7BdbTCyHHiI9fX8zWl+ejDwYIQgsKPjdXtDUAmL9x6YWJ5MGzwA1jhg24oKfjubB1Ni78MVyYvxsX5u8+pgBxY//ms8YFn7G5emEyLvgO+OgHVQkTz2t9Lp63jM92BQ5AliZbWxagJwRp87Jjy+SMJYtzjQwAbLdkjdhRUfHiASlZuCcPSpAtFO27IGyWHZrZ2LoDQYJXBApujJMyGajfMg50Eyaey0qMbmB9f5DW9Z0l+fNzjnvhyOweCViAnzwkupsg2G+R1l2CwZIgnPBcwwbfOSa9cWH+DuCiKTo3eOe8xYrFl8WNcUFMwQfwwmRc8Czw0Q+qECbWkh707MyaoklpgwER9DF4k3d3dq4hWsZQvplwmaNBKFs2a9yybaUE5B6IDw+1ODtuihIIueDSYHeJCh1NQEi2MqjuIFvyq3Ac2nNi67Nv9m8P1uA10V+bUxauFS2xe0E3YWpK958cGFjfpdK6vne46yQ1eiqIEkJqZRz9pxmSv7Tx8/fCxPgVwa6Qdi6Ggaa09xQngnFh/m5c2NxY79HsHLHn4ws+jIuXJf+MFybjgliDj15BawG/WSf6H/RPa708jm7CxM4P3+NZzfr5+UJHsMgoN9tOAw+6wP3brqGQfhKcJ0DsOvfi2LbisfD4cie+VnfALf2nGGROnJVmOUZJtFXLiP5RJEyWlLw4dIOtaby+5iec5zspXewnFt634vnH312U3QcJ44Lmblkw/4nigHlyjbKQ6sNKIeYHH8aFF2AvTICxg+ajmzANFQgPWdpq3oRNF5QaHldGx1WBDE9gU3bygoDAK4NYmDYVUELx1o1EQ6yVQSxMwwDiOd8d7y+T/P9xK1NHJyT0AnYNvnleBpP9U5JBgZ2Ib56XAVyULaunBP4HR5fJWDSkilAAAAAASUVORK5CYII=>
++
++[image17]: <data:image/png;base64,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>
++
++[image18]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAZCAYAAAB3oa15AAACI0lEQVR4Xu2Xz4tOURjHv4aM5NeMSCLjx8JkZCFLes3GSlgqSigWNkQyiEgJpZRpygZNUTZKsbJSNmLpn/BH8P30nNO9Tu+dd8o03lvvpz7NvefcX+d5nnPOO9KAAQMG9BN77AN7o5C2VrDBHran7S97K51jq+jYz3Zz0d4artindnnZ0QbG7Be7r2hvDUfsb8V8aCWUDwNYWnb0CXxX47ettq8VA+g3jtpvivIe+7urYrf9bn+UHQkm9cqycRE5aV+o4RuW2NuK6N8r+oAl9ZkdLTsWCd77QbHEd2WdfacYwPGiDy4o5gessm/tWXvfPlJVlxsVAbhjL9vh1L7GXrePFYE4l9rnYsgeUyzp0/aT5igfls2fihKilOqQna92Ip0fUgzmvd2uePgKu0kxMHZuXn7Jrk/3PLcn0jHRPJOOm+CdpxT3EbCrivnJPO0KLyP6b+xaxQP4u9c+sTOqaq+j+Gh+csBORQbIxiu71Z5XRDln5qOqpZlyPJCOm9ihmLAH0/lDVRWwIFCP9b2CSJPiTq0tQ8TzYOGieu/ylGDOLPBssr1Lve+dF+VPDbJDltgIgdonC1sU1+UBcE7p9YLriToZXKYon22KZzbuA/Ol/kF1xu1LxSJwVxGxDO1MbsqM+dQLspvLdMrO2mt2f/2if4FJ2g3aR8rGGtQ+5QdsTuX/HlngWayOZOC/7UG8mGV20t5UlEVemVoDkeSjWQ4XlD/XwkzJKa9lfgAAAABJRU5ErkJggg==>
++
++[image19]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAZCAYAAABD2GxlAAAA8UlEQVR4Xu2VvQ4BQRSFLwqJnwgiEp1e4wF0QiVRaPU6Qi0SCu/hAZRUnkCi8AR6D8G5md3sujGzCm4imS/5ktk5U5zZncwSeTwezzfJw7qcjMML2jArAwV68AhXMgjJwA28wpbIfskUnuEFPshRsAYPgTzWogDLcEwJBcMFIxkoYS04gHcyYdxcfJEC1oJcpApPcA+bwbM21oIhN7iGKTGvRWJBDody8g28gRKZt/yJnx4VZ8EG3MGiDBRxFuzAJUWfl6+ZdBSr4Cw4gf1gzCX58tTGWXBO5u/B5bpw8RqrMCNTcEuWc1shc6t7PJ5/4gmdKyu0eOFw/AAAAABJRU5ErkJggg==>
++
++[image20]: <data:image/png;base64,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>
++
++[image21]: <data:image/png;base64,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>
++
++[image22]: <data:image/png;base64,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>
++
++[image23]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABUAAAAZCAYAAADe1WXtAAAA60lEQVR4XmNgGAWjAAbsgLgaiCvRcAUQ8yOpIwkoA7EjEDcB8TEgDobyTYCYBUkdWaAIiGuBmBFdglzABcSzgdgdXYIS4ADE/4GYF02cIgDyOshQqgGY16lqqAIQHwbik2jiuAAfEHsBMRu6BDJwYIC4chGaOAyAwhmWInyB+BwQz2CA+BArAGkAGQYyFFvMgwyzRROrZyBgqAIDxOtngVgDVQoMQGJCaGIEDQW5DuZ19OQkDMSzGDAzA0FDOxkghoKyKEgzKFuKMkDC7gQQP4CrRACChpIDhoah+UB8BYifA/EeIG5BlR6xAAA+HybBZL8sxgAAAABJRU5ErkJggg==>
++
++[image24]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAZCAYAAAAmNZ4aAAABjklEQVR4Xu2UyytFURSHFwqJvFLMpERSkhSzq0gKSSZKMmOkSAYUeeSRgZmUAclAyUAGyESUMpeUP4bf7651r33OPYOj7jHaX33d/T7rrL3uEfF4PB7PHymA5/AevsNv8ws+wDVYnF2dR/rgk+iD+ftpbXoLx0WDyytt8MzpD8Adp58YLbDe2kVwC85kZ/+JHvgMm8MTSbMoeqc14QnQANfhHlyBQ6LZOoA3sBsuw1NYbnsK4THcNbdtPEAVvIKHklvBvIpLazfBV5iCs7Ba9PBJ2A+vRQNnMU7BEmsvwROJoAN+wLnQODctiB5OuO4ONsIu2G59BlQr+tYMnP0X3ZKuHWaKGc2Bixk90+PSCt9grwQPYIZK4ZH8FuOg6APJqkQHG5s60SvgZv71mGY+YBiWiR4+ZmunRYMjHOMcU80g+IGqsLlYMNUTcF/0njZFv2TzNs8i492NiAaZgQXGtRui9x6Z5jjw7QgDYeTulfCaKp2+S6ZoU6HxRODbP8JReAE7g9PJwlSzysPFmuYHFlk7e7VXPjkAAAAASUVORK5CYII=>
++
++[image25]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACQAAAAZCAYAAABZ5IzrAAABqUlEQVR4Xu2UyytFURTGP48Q8kwhg5tERgbyysREhh5JKUpRxARJiQEDUYqBPCZmDJUyQFFK/gEDY+UP4ftaa7Ndk5vBNTlf/Tprr7P2WWvvvfYBEiVKlChRoj/rhNySZ/IRofF1FJcV9ZFHWEH35M3twJHHZUXN5CIaN6aNs64UqY3Go+Q4Gv+rUuSJDKX5/00q5JW0Rb4cMkJ2Yb2243YrWSLr5DwEu8rINtmDxUy7v4ZskE1Yri1yBtuIX8qDJbqDTQyqJ2PkhUzACiwlh7DE0iQpdlvvdAkUV0UuyZS/nyflbq+QXvJOejQxXUr8AOufosivphen+E6q2O6vCGAZtiBpGN+/CcXdkA5SR9rdXwHb7RLYaeS7/4fkrPRnurTSvmg8RwrcVjIlbYIllT0exR3AdiUXVoi+r+MKi2sghW5nLK0i5bZ2L76F2h0d9QxsQdrJAdjNvYIV1UX6Yf3Z6fGS4hfwh4LiFVXDEgUNwv7yLT5WX6ioNbJI9skqbCcVNwsrXt+UP+7XjBUfo5o1FBekRo6l41ScpHdhvuaFuboQISZRxvoEcR072E10yTgAAAAASUVORK5CYII=>
++
++[image26]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAZCAYAAABQDyyRAAABnElEQVR4Xu2VzytFURDHv/IzCZGShFKS2JCFoihlqyhZkCXZyUaykA1SYiFLyUJKkQXK2s5Gsrb3R/D9Nue6z3hv8dQ7q/utT9175t45c+bMnANkypQpVQO5IG9kx9miqYJskC9S7mzR1EteSJs3xFI1OSaz3hBTWv0r6feGWCqD1cGyN8TUB7kmTW48mh7JJxnzhhiqJ++wbdCZEK0l28kNOUHaDQoiSkf0kAfY5MqANAUL4DS8t5JtWG3skSMyF2xD4bstshvGJBX0CCyT++SAdOTYf/QMW70mSaR2VC2oJaUZ0k0OSSe5I5vBdon031wfE+Q8PCuT8teSmk3DMGddblzRr8OyUEXGYc5vg62PNMICXSXNZACWJUkdpGwthHe1tYKXr1+q8wNOsic/zSPdkkSjyLMq2Lf3sMAUpJ612H9L3aD9XXPjuj9y7w4VcyVsMmVLASySJ/dd0VK6r/D3bNB2qLhUtAouOUF1u67AMnaGAukvVjWwCb3kWHuuSfNJky/5wVJqENZZqoNpMon8gZdUtbD9L3iffAMzHDm6Og6u+QAAAABJRU5ErkJggg==>
+\ No newline at end of file
