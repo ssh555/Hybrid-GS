@@ -649,6 +649,23 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # ==============================================================================
+        # [新增] HybridGS / SWinGS 扩展属性的致密化同步拼接
+        # 作用：确保克隆或分裂出的新高斯，继承正确的生命周期和分类掩码，防止张量维度崩溃
+        # ==============================================================================
+        if hasattr(self, '_start_frame') and self._start_frame.numel() > 0:
+            num_new_pts = new_xyz.shape[0]
+            
+            # 策略：新分裂/克隆出的点，生命周期继承当前的滑动窗口末尾（或者给一个默认值）
+            # 由于在底层模型中无法直接获取 trainer 的 window_end，这里赋予最安全的动态默认值
+            # 存活时间设为当前已有点的最大生命周期值，或者依靠后续滑动窗口的 alive_idx 更新来接管
+            default_start = torch.zeros(num_new_pts, dtype=torch.int32, device="cuda")
+            default_expire = torch.full((num_new_pts,), torch.max(self._expire_frame).item(), dtype=torch.int32, device="cuda")
+            default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda") # 默认为未分类的动态点
+            
+            self._start_frame = torch.cat([self._start_frame, default_start], dim=0)
+            self._expire_frame = torch.cat([self._expire_frame, default_expire], dim=0)
+            self._mask_dynamic = torch.cat([self._mask_dynamic, default_mask], dim=0)
 
     def densification_postfix_static(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
         d = {"static_xyz": new_xyz,

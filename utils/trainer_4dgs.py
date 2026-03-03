@@ -220,9 +220,6 @@ class Trainer4DGS(BaseTrainer):
             with torch.no_grad():
                 # [核心指标追踪]：显存、耗时、3D/4D高斯数量
                 if iteration % 100 == 0:
-                    self.metrics_tracker.record_vram(iteration)
-                    self.metrics_tracker.record_training_time(iteration)
-                    
                     num_4d = self.gaussians.get_xyz.shape[0]
                     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
                     self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
