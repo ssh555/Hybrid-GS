@@ -280,6 +280,16 @@ class TrainerSWinGS(Trainer4DGS):
 
                 # 优化器步进
                 if iteration < self.opt.iterations:
+                    # [新增] SWinGS 自适应梯度缩放机制
+                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                        # 估算每个高斯存活的窗口数量 (当前帧号 - 出生帧号)
+                        # 为防止除零，最小存活单位设为 1
+                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
+                        decay_factor = 1.0 / age.float()
+                        
+                        # 仅对动态点应用空间梯度衰减，防止老点被过度拉扯
+                        if self.gaussians._xyz.grad is not None:
+                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad(set_to_none=True)
                     if self.env_map_optimizer and iteration < self.pipe.env_optimize_until:

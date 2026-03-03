@@ -576,6 +576,14 @@ class GaussianModel:
             if self.rot_4d:
                 self._rotation_r = optimizable_tensors['rotation_r']
             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
+        # ==============================================================================
+        # [必须新增的修复]：同步裁剪 SWinGS/HybridGS 的生命周期与分类掩码
+        # 作用：确保剪枝后，所有张量的第 0 维度长度绝对一致，防止渲染切片时崩溃！
+        # ==============================================================================
+        if hasattr(self, '_start_frame') and self._start_frame.numel() > 0:
+            self._start_frame = self._start_frame[valid_points_mask]
+            self._expire_frame = self._expire_frame[valid_points_mask]
+            self._mask_dynamic = self._mask_dynamic[valid_points_mask]
 
     def prune_static_points(self, mask):
         valid_points_mask = ~mask
