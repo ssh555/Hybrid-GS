@@ -62,6 +62,12 @@ class ModelParams(ParamGroup):
         self.from3dgs = ""
         self.start_timestamp = 0
         self.end_timestamp = -1
+
+        # ==========================================================
+        # [新增] 路由模型类型 (Baseline, SWinGS, HybridGS)
+        # ==========================================================
+        self.model_type = "hybrid_gs"
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -109,6 +115,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
         self.scale_t_threshold =3.0
+
+        # ==========================================================
+        # [新增] SWinGS 与 HybridGS 专属超参数
+        # ==========================================================
+        self.swin_size = 50         # SWinGS: 滑动窗口大小 (例如每次只看50帧)
+        self.tau_avg = 0.01         # HybridGS 硬约束: 平均位移阈值
+        self.tau_max = 0.05         # HybridGS 硬约束: 最大瞬时位移阈值
+        self.lambda_d = 0.1         # HybridGS 软约束: 位移收敛正则化惩罚系数
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

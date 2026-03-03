@@ -8,13 +8,12 @@ batch_size: 4
 exhaust_test: False
 # start_checkpoint: "output/$dataset/chkpnt6000.pth"
 
-
 ModelParams:
   sh_degree: 3
-  # source_path: ".../$dataset"
-  # model_path: "output/$dataset"
+  source_path: ".../$dataset"
+  model_path: "output/$dataset"
   images: "images"
-  resolution: 1 # use 2 for the original resolution dataset!
+  resolution: 1 
   white_background: False
   data_device: "cuda"
   eval: True
@@ -23,6 +22,8 @@ ModelParams:
   loaded_pth: ""
   frame_ratio: 1
   dataloader: True
+  # [核心路由] 指定使用的模型类型
+  model_type: "hybrid_gs"   # 可选值: baseline_4dgs, swings, hybrid_gs
 
 PipelineParams:
   convert_SHs_python: False
@@ -34,12 +35,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 6_000
+  iterations: 6000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30_000
+  position_lr_max_steps: 30000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -50,12 +51,20 @@ OptimizationParams:
   densification_interval: 100 
   opacity_reset_interval: 30000
   densify_from_iter: 500 
-  densify_until_iter: 15_000
+  densify_until_iter: 15000
   densify_grad_threshold: 0.0002
-  densify_grad_t_threshold: 0.0002 / 40 
+  densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: -1
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0
+  
+  # ==========================================================
+  # [新增] SWinGS 与 HybridGS 专属超参数
+  # ==========================================================
+  swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
+  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
+  tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
+  lambda_d: 0.1             # HybridGS 软约束：位移收敛正则化系数
