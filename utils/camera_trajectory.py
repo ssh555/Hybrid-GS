@@ -6,6 +6,8 @@ from scipy.spatial.transform import Rotation as R_scipy
 from scipy.interpolate import CubicSpline
 from scene.cameras import Camera
 import copy
+# [新增导入] 引入 3DGS 投影矩阵计算工具
+from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 def generate_smooth_trajectory(keyframes, num_frames=300):
     """
@@ -63,14 +65,40 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
 
     for i in range(num_frames):
         new_cam = copy.deepcopy(base_cam)
-        # 写回插值后的位姿
-        new_cam.T = torch.tensor(smooth_T[i], dtype=torch.float32, device="cuda")
-        # 恢复 3DGS 格式的转置旋转矩阵
-        new_cam.R = torch.tensor(smooth_R_mats[i].T, dtype=torch.float32, device="cuda")
+        
+        R_matrix = smooth_R_mats[i].T
+        T_vector = smooth_T[i]
+        
+        # 写回基础位姿
+        new_cam.R = torch.tensor(R_matrix, dtype=torch.float32, device="cuda")
+        new_cam.T = torch.tensor(T_vector, dtype=torch.float32, device="cuda")
         new_cam.FoVx = float(smooth_fovx[i])
         new_cam.timestamp = float(smooth_timestamp[i])
         new_cam.uid = int(interp_frame_ids[i])
         new_cam.image_name = f"render_frame_{i:04d}"
+        
+        # ===================================================================
+        # [必须新增的修复：手动刷新光栅化引擎依赖的投影矩阵！]
+        # 如果不更新这三个矩阵，渲染出的视频将是定格在第一帧的静止画面！
+        # ===================================================================
+        # 1. 重新计算 World-to-View 矩阵 (W2C)
+        new_cam.world_view_transform = torch.tensor(
+            getWorld2View2(R_matrix, T_vector, np.array([0.0, 0.0, 0.0]), 1.0)
+        ).transpose(0, 1).cuda()
+        
+        # 2. 重新计算投影矩阵 (考虑可能微变的 FoVx)
+        new_cam.projection_matrix = getProjectionMatrix(
+            znear=new_cam.znear, zfar=new_cam.zfar, fovX=new_cam.FoVx, fovY=new_cam.FoVy
+        ).transpose(0, 1).cuda()
+        
+        # 3. 重新计算全投影矩阵 (W2C * Proj)
+        new_cam.full_proj_transform = (
+            new_cam.world_view_transform.unsqueeze(0).bmm(new_cam.projection_matrix.unsqueeze(0))
+        ).squeeze(0)
+        
+        # 4. 更新相机光心坐标
+        new_cam.camera_center = new_cam.world_view_transform.inverse()[3, :3]
+
         trajectory.append(new_cam)
 
     return trajectory
