@@ -72,10 +72,18 @@ class RenderWorker(QThread):
                                       rot_4d=getattr(args, 'rot_4d', True), 
                                       force_sh_3d=getattr(args, 'force_sh_3d', True))
             
-            checkpoint = os.path.join(dataset.model_path, "chkpnt_30000.pth")
-            if not os.path.exists(checkpoint):
-                self.error_occurred.emit(f"找不到权重文件: {checkpoint}")
+            # [体验优化：自动寻找最新的 chkpnt 文件]
+            import glob
+            search_pattern = os.path.join(dataset.model_path, "chkpnt_*.pth")
+            pth_files = glob.glob(search_pattern)
+            
+            if not pth_files:
+                self.error_occurred.emit(f"错误: 在 {dataset.model_path} 下找不到任何 chkpnt_*.pth 文件")
                 return
+            
+            # 找到迭代次数最大的模型
+            checkpoint = max(pth_files, key=os.path.getctime)
+            print(f"[UI 渲染器] 自动加载最新权重: {checkpoint}")
 
             (model_params, first_iter) = torch.load(checkpoint)
             gaussians.restore(model_params, None)
@@ -94,7 +102,7 @@ class RenderWorker(QThread):
             for i, cam in enumerate(trajectory):
                 if not self.is_running:
                     break
-                while self.is_paused:
+                while self.is_paused and self.is_running:
                     time.sleep(0.1)
                     
                 start_time = time.time()
@@ -107,6 +115,9 @@ class RenderWorker(QThread):
                 rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
                 img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                 
+                # [核心修复：强制转为连续内存，防止 QImage 花屏]
+                img_np = np.ascontiguousarray(img_np)
+
                 # 转换为 PyQt QImage
                 h, w, ch = img_np.shape
                 bytes_per_line = ch * w
