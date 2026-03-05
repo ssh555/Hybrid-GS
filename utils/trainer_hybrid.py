@@ -57,6 +57,11 @@ class TrainerHybrid(TrainerSWinGS):
                 
                 # [核心斩断逻辑]：永久冻结为 3D 静态背景 (mask = 1)
                 self.gaussians._mask_dynamic[global_static_indices] = 1
+                
+                # [新增：物理归零压缩法] 抹除时间属性数据，不仅保证物理静止，更为 ZIP 无损压缩提供极大冗余！
+                self.gaussians._t.data[global_static_indices] = 0.0
+                if hasattr(self.gaussians, '_scaling_t'):
+                    self.gaussians._scaling_t.data[global_static_indices] = 0.0
 
     def train(self):
         """重写训练大循环，全面注入软硬约束"""
