@@ -62,6 +62,9 @@ class TrainerHybrid(TrainerSWinGS):
                 self.gaussians._t.data[global_static_indices] = 0.0
                 if hasattr(self.gaussians, '_scaling_t'):
                     self.gaussians._scaling_t.data[global_static_indices] = 0.0
+                # 顺手将时间维度的旋转特征也彻底归零（如果有的话）
+                if hasattr(self.gaussians, '_rot_r'):
+                    self.gaussians._rot_r.data[global_static_indices] = 0.0
 
     def train(self):
         """重写训练大循环，全面注入软硬约束"""
