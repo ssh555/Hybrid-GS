@@ -417,12 +417,63 @@ if __name__ == '__main__':
                 fname = os.path.basename(fname)
                 pose = np.array(frame['transform_matrix']) @ blender2opencv
                 fname2pose.update({fname: pose})
-                
+
+    # ===== 在这里添加尺寸验证和修复代码 =====
+    print("[INFO] Verifying and fixing image sizes...")
+
+    # 从 poses_bounds 获取正确的 H, W, fl
+    # 你的代码中已经有正确的 H, W, fl 值
+    print(f"[INFO] Current H from calculation: {H}, W: {W}, fl: {fl}")
+
+    # 直接使用已经计算好的 H, W
+    target_width = int(round(W))
+    target_height = int(round(H))
+
+    print(f"[INFO] Target image size: {target_width} x {target_height}")
+
+    # 检查并修复所有图像
+    for filename in os.listdir(images_path):
+        if filename.endswith(".png"):
+            full_path = os.path.join(images_path, filename)
+            img = Image.open(full_path)
+            
+            # 如果尺寸不匹配，调整到目标尺寸
+            if img.width != target_width or img.height != target_height:
+                print(f"[INFO] Resizing {filename}: {img.width}x{img.height} -> {target_width}x{target_height}")
+                resized_img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                resized_img.save(full_path)
+            else:
+                print(f"[OK] {filename} already correct size: {img.width}x{img.height}")
+
+    # 验证所有在 fname2pose 中的图像
+    print("[INFO] Verifying images in fname2pose...")
+    for fname in fname2pose.keys():
+        img_path = os.path.join(images_path, fname)
+        if os.path.exists(img_path):
+            with Image.open(img_path) as img:
+                if img.width != target_width or img.height != target_height:
+                    print(f"[ERROR] {fname} has wrong size: {img.width}x{img.height} (expected {target_width}x{target_height})")
+                    # 自动修复
+                    resized_img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    resized_img.save(img_path)
+                    print(f"[INFO] Fixed {fname}")
+                else:
+                    print(f"[OK] {fname}: {img.width}x{img.height}")
+        else:
+            print(f"[ERROR] {fname} not found at {img_path}")
+
+    print("[INFO] All images verified and fixed.")
+    # ===== 尺寸验证结束 =====
+
     if(os.path.exists(os.path.join(colmap_workspace, 'images'))):
         shutil.rmtree(os.path.join(colmap_workspace, 'images'))
     os.makedirs(os.path.join(colmap_workspace, 'images'), exist_ok=True)
+    # for fname in fname2pose.keys():
+    #     os.symlink(os.path.abspath(os.path.join(images_path, fname)), os.path.join(colmap_workspace, 'images', fname))
     for fname in fname2pose.keys():
-        os.symlink(os.path.abspath(os.path.join(images_path, fname)), os.path.join(colmap_workspace, 'images', fname))
+        src = os.path.abspath(os.path.join(images_path, fname))
+        dst = os.path.abspath(os.path.join(colmap_workspace, 'images', fname))
+        shutil.copy2(src, dst)
                 
     with open(os.path.join(colmap_workspace, 'created/sparse/images.txt'), 'w') as f:
         idx = 1
@@ -446,7 +497,9 @@ if __name__ == '__main__':
     
     do_system(f"colmap feature_extractor \
                 --database_path {db_path} \
-                --image_path {os.path.join(colmap_workspace, 'images')}")
+                --image_path {os.path.join(colmap_workspace, 'images')} \
+                --ImageReader.single_camera 1 \
+                --ImageReader.camera_model PINHOLE")
     generate_images_txt_from_database(db_path, colmap_workspace)
     camTodatabase(os.path.join(colmap_workspace, 'created/sparse/cameras.txt'), db_path)
     
@@ -467,7 +520,12 @@ if __name__ == '__main__':
                 --output_type TXT")
     
     os.makedirs(os.path.join(colmap_workspace, 'dense'), exist_ok=True)
-    
+        
+    # 把tmp/images下面拷贝过来的图片拷贝回去
+    for fname in fname2pose.keys():
+        dst = os.path.abspath(os.path.join(images_path, fname))
+        src = os.path.abspath(os.path.join(colmap_workspace, 'images', fname))
+        shutil.copy2(src, dst)
     do_system(f"colmap image_undistorter  \
                 --image_path  {os.path.join(colmap_workspace, 'images')} \
                 --input_path  {os.path.join(colmap_workspace, 'created/sparse')} \
