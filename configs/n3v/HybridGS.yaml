@@ -10,8 +10,8 @@ exhaust_test: False
 
 ModelParams:
   sh_degree: 3
-  source_path: ".../$dataset"
-  model_path: "output/$dataset"
+  source_path: "./datasets/miku_shaungxue_daxi_shorttest"
+  model_path: "output/hybrid_gs/miku_shaungxue_daxi_shorttest"
   images: "images"
   resolution: 1 
   white_background: False
