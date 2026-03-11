@@ -33,35 +33,21 @@ namespace CudaRasterizer
 		char* scanning_space;
 		bool* clamped;
 		int* internal_radii;
-		int* internal_radii_static;
 		float2* means2D;
 		float* cov3D;
 		float4* conic_opacity;
 		float* rgb;
 		uint32_t* point_offsets;
 		uint32_t* tiles_touched;
-		float4* conic_opacity_static;
-		float* rgb_static;
-		float* cov3D_static;
 
-		static GeometryState fromChunk(char*& chunk, size_t P, size_t P_static, size_t P_total);
+		static GeometryState fromChunk(char*& chunk, size_t P);
 	};
 
 	struct ImageState
 	{
-		uint32_t *bucket_count;
-		uint32_t *bucket_offsets;
-		size_t bucket_count_scan_size;
-		char * bucket_count_scanning_space;
-		float* pixel_colors;
-		float* pixel_invDepths;
-		uint32_t* max_contrib;
-
-		size_t scan_size;
 		uint2* ranges;
 		uint32_t* n_contrib;
 		float* accum_alpha;
-		char* contrib_scan;
 
 		static ImageState fromChunk(char*& chunk, size_t N);
 	};
@@ -77,23 +63,6 @@ namespace CudaRasterizer
 
 		static BinningState fromChunk(char*& chunk, size_t P);
 	};
-
-	struct SampleState
-	{
-		uint32_t *bucket_to_tile;
-		float *T;
-		float *ar;
-		float *ard;
-		static SampleState fromChunk(char*& chunk, size_t C);
-	};
-
-	template<typename T> 
-	size_t required_geom(size_t P, size_t P_static, size_t P_total)
-	{
-		char* size = nullptr;
-		T::fromChunk(size, P, P_static, P_total);
-		return ((size_t)size) + 128;
-	}
 
 	template<typename T> 
 	size_t required(size_t P)

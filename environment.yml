@@ -1,20 +1,19 @@
-name: 3d4dgs
-channels:
-  - pytorch
-  - conda-forge
-  - defaults
+name: hybrid-gs
 dependencies:
-  - cudatoolkit=11.6
+  - python=3.10   # 配合新版 PyTorch，升级到 3.10 更稳
+  - pip
   - plyfile=0.8.1
-  - python=3.7.13
-  - pip=22.3.1
-  - pytorch=1.12.1
-  - torchaudio=0.12.1
-  - torchvision=0.13.1
   - colmap
   - ffmpeg
   - mpir
+  # 强制 Conda 在本地环境安装 CUDA 12.4 的完整编译器 (完美匹配 RTX 50 系)
+  - conda-forge::cuda-toolkit=12.4.1
   - pip:
+    # 去官方拉取支持 CUDA 12.4 的新版 PyTorch
+    - --extra-index-url https://download.pytorch.org/whl/cu124
+    - torch==2.4.0+cu124
+    - torchvision==0.19.0+cu124
+    - torchaudio==2.4.0+cu124
     - tqdm==4.66.1
     - mediapy==1.1.2
     - torchmetrics==0.11.4
@@ -23,6 +22,3 @@ dependencies:
     - omegaconf==2.3.0
     - lpips
     - opencv-python
-    - ./simple-knn
-    - ./pointops2
-    
