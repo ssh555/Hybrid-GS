@@ -208,6 +208,15 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    # # 新增模型路由参数
+    # parser.add_argument("--model_type", type=str, default="hybrid_gs", 
+    #                     choices=["baseline_4dgs", "swings", "hybrid_gs"], 
+    #                     help="选择要训练的模型基线")
+    # # 预留给 SWinGS 和 HybridGS 的超参数 -> config.yaml文件中若对应项没有被注释，则优先使用config
+    # parser.add_argument("--swin_size", type=int, default=50, help="滑动窗口长度")
+    # parser.add_argument("--tau_avg", type=float, default=0.01, help="硬约束平均位移阈值")
+    # parser.add_argument("--tau_max", type=float, default=0.05, help="硬约束最大瞬时位移阈值")
+    # parser.add_argument("--lambda_d", type=float, default=0.1, help="位移收敛软约束惩罚系数")
 
     parser.add_argument("--config", type=str)
     parser.add_argument('--debug_from', type=int, default=-1)
