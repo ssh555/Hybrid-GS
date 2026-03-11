@@ -11,3 +11,10 @@ do
     --source_path $source_path 
     
 done
+
+# 2. 创建虚拟环境 (在你的 BiShe 文件夹下)
+cd ~/BiShe
+python3 -m venv myenv
+
+# 3. 激活环境
+source myenv/bin/activate
