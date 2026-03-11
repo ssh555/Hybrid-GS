@@ -11,6 +11,9 @@ import sqlite3
 import cv2
 from PIL import Image
 
+# 在导入其他库之后，但在任何其他操作之前设置环境变量
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
 IS_PYTHON3 = sys.version_info[0] >= 3
 MAX_IMAGE_ID = 2**31 - 1
 
@@ -263,7 +266,21 @@ if __name__ == '__main__':
     # path must end with / to make sure image path is relative
     if args.path[-1] != '/':
         args.path += '/'
-        
+    # ===== 清理旧的 tmp 目录 =====
+    colmap_workspace = os.path.join(args.path, 'tmp')
+    if os.path.exists(colmap_workspace):
+        print(f"[INFO] Removing old COLMAP workspace: {colmap_workspace}")
+        shutil.rmtree(colmap_workspace)
+    
+    # 可以选择是否清理 images 目录
+    images_path = os.path.join(args.path, "images/")
+    # 如果你想每次都重新提取图像，取消下面的注释
+    if os.path.exists(images_path):
+        print(f"[INFO] Removing old images directory: {images_path}")
+        shutil.rmtree(images_path)
+    os.makedirs(images_path, exist_ok=True)
+    # ===== 结束清理 =====
+
     # extract images
     videos = [os.path.join(args.path, vname) for vname in os.listdir(args.path) if vname.endswith(".mp4")]
     images_path = os.path.join(args.path, "images/")

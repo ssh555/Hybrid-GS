@@ -1,3 +1,5 @@
 datasets/**
 changes.diff
 *.diff
+colmap/**
+colmap
