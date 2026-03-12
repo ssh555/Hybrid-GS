@@ -128,6 +128,11 @@ class Trainer4DGS(BaseTrainer):
         
         print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
+        log_path = os.path.join(self.args.model_path, "test_metrics.json")
+        self.metrics_tracker.save_log(log_path)
+        print(f"测试完成！指标已保存至 {log_path}")
+
+
     def train(self):
         """完整复刻原版 3D-4DGS 的训练大循环，接入 Lazy DataLoader 与全面评估"""
         print(f"\n[Trainer4DGS] 开始训练 Baseline，总迭代次数: {self.opt.iterations}")
@@ -305,6 +310,10 @@ class Trainer4DGS(BaseTrainer):
                     print(f"\n[Trainer4DGS] 正在保存模型至 Iteration {iteration}")
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
+                    # [新增代码] 保存标准的 .ply (防报错，且方便后续用第三方软件可视化查看)
+                    ply_path = os.path.join(self.args.model_path, f"point_cloud/iteration_{iteration}")
+                    os.makedirs(ply_path, exist_ok=True)
+                    self.gaussians.save_ply(os.path.join(ply_path, "point_cloud.ply"))
 
         progress_bar.close()
         
