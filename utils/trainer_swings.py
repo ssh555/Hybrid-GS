@@ -115,6 +115,10 @@ class TrainerSWinGS(Trainer4DGS):
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
         print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+        # 记录 TEST JSON 日志
+        log_path = os.path.join(self.args.model_path, "test_metrics.json")
+        self.metrics_tracker.save_log(log_path)
+        print(f"测试完成！软硬约束指标与模型已保存至 {log_path}。")
 
     def train(self):
         """SWinGS 滑动窗口训练大循环"""
@@ -310,6 +314,10 @@ class TrainerSWinGS(Trainer4DGS):
                 if iteration in self.saving_iterations:
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
+                    # [新增代码] 保存标准的 .ply (防报错，且方便后续用第三方软件可视化查看)
+                    ply_path = os.path.join(self.args.model_path, f"point_cloud/iteration_{iteration}")
+                    os.makedirs(ply_path, exist_ok=True)
+                    self.gaussians.save_ply(os.path.join(ply_path, "point_cloud.ply"))
 
         progress_bar.close()
         
