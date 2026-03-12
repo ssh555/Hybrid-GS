@@ -22,7 +22,9 @@ class CameraDataset(Dataset):
                 im_data = np.array(image_load.convert("RGBA"))
             norm_data = im_data / 255.0
             arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + self.bg * (1 - norm_data[:, :, 3:4])
-            image_load = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            # image_load = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            # 使用 np.uint8 替代 np.byte
+            image_load = Image.fromarray(np.array(arr * 255.0).astype(np.uint8), "RGB")
             resized_image_rgb = PILtoTorch(image_load, viewpoint_cam.resolution)
             viewpoint_image = resized_image_rgb[:3, ...].clamp(0.0, 1.0)
             if resized_image_rgb.shape[1] == 4:

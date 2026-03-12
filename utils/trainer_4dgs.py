@@ -37,13 +37,37 @@ class Trainer4DGS(BaseTrainer):
             sh_degree_t=2 if self.pipe.eval_shfs_4d else 0
         )
         self.gaussians.training_setup(self.opt)
+
+        # =========================================================
+        # [新增] 强行挂载官方 Scene！
+        # 它的作用：读取 COLMAP 相机、加载 points3d.ply 稀疏点云并种下高斯种子！
+        # =========================================================
+        from scene import Scene
+        print("\n[Trainer] 正在通过 Scene 加载 COLMAP 数据与点云...")
+
+        # 【新增修复代码】提前建好输出文件夹！防止 Scene 拷贝点云备份时找不到路！
+        os.makedirs(self.args.model_path, exist_ok=True)
+        print(f"[Trainer] 已确保模型输出路径存在: {self.args.model_path}")
+        self.scene = Scene(self.dataset, self.gaussians)
         
+        # 顺手把真实的帧数更新一下，覆盖之前 trainer_base 里的估算值
+        self.dataset.total_frames = len(self.scene.getTrainCameras())
+        print(f"[Trainer] Scene 加载完毕，总帧数锁定为: {self.dataset.total_frames}\n")
+        # =========================================================
+
         # 3. 恢复 Checkpoint
         self.first_iter = 0
         if self.args.start_checkpoint:
-            (model_params, first_iter) = torch.load(self.args.start_checkpoint)
-            self.gaussians.restore(model_params, self.opt)
-            self.first_iter = first_iter
+            # 只有当文件确实存在时，才进行加载
+            if os.path.exists(self.args.start_checkpoint):
+                print(f"[加载] 发现 Checkpoint: {self.args.start_checkpoint}，正在恢复模型状态...")
+                (model_params, self.first_iter) = torch.load(self.args.start_checkpoint)
+                self.gaussians.restore(model_params, self.opt)
+            else:
+                # 如果文件不存在，仅打印警告而不崩溃
+                # 这样你训练时就不需要去 YAML 里注释掉这一行了
+                print(f"[提示] 未找到 Checkpoint 文件: {self.args.start_checkpoint}")
+                print("[提示] 将作为全新任务从第 0 代开始训练。")
 
         # 4. 背景颜色
         bg_color = [1, 1, 1] if hasattr(self.dataset, 'white_background') and self.dataset.white_background else [0, 0, 0]
@@ -114,7 +138,7 @@ class Trainer4DGS(BaseTrainer):
         
         progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="Training progress")
         total_frames = self.dataset.total_frames
-        
+        print('[INFO] 数据集总帧数 (total_frames):', total_frames)
         for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
             iter_start.record()
             self.gaussians.update_learning_rate(iteration)
@@ -134,7 +158,18 @@ class Trainer4DGS(BaseTrainer):
             for batch_idx in range(batch_size):
                 # Lazy DataLoader：随机选取一帧
                 frame_id = randint(0, total_frames - 1)
-                viewpoint_cam = self.dataset.get_camera_data(frame_id)
+                # ====== [新增/修改] 兼容标准 3DGS 场景读取器的 4D 相机获取逻辑 ======
+                train_cameras = self.scene.getTrainCameras()
+                # 确保索引不越界，安全获取当前帧对应的相机
+                viewpoint_cam = train_cameras[frame_id % len(train_cameras)]
+                
+                # 极其关键：4DGS 的高斯球形变网络强依赖时间戳，而原版 COLMAP 相机没有。
+                # 我们在这里动态为相机注入 fid (帧序号) 和 time (0.0~1.0 归一化时间)
+                if not hasattr(viewpoint_cam, 'fid'):
+                    viewpoint_cam.fid = frame_id
+                if not hasattr(viewpoint_cam, 'time'):
+                    viewpoint_cam.time = frame_id / max(1, len(train_cameras) - 1)
+                # ======================================================================
                 gt_image = viewpoint_cam.original_image.cuda()
                 
                 # 前向渲染

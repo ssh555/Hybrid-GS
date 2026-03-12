@@ -108,7 +108,18 @@ class TrainerHybrid(TrainerSWinGS):
             for batch_idx in range(batch_size):
                 # 从当前滑动窗口中随机抽帧
                 frame_id = randint(self.window_start, self.window_end)
-                viewpoint_cam = self.dataset.get_camera_data(frame_id)
+                # ====== [新增/修改] 兼容标准 3DGS 场景读取器的 4D 相机获取逻辑 ======
+                train_cameras = self.scene.getTrainCameras()
+                # 确保索引不越界，安全获取当前帧对应的相机
+                viewpoint_cam = train_cameras[frame_id % len(train_cameras)]
+                
+                # 极其关键：4DGS 的高斯球形变网络强依赖时间戳，而原版 COLMAP 相机没有。
+                # 我们在这里动态为相机注入 fid (帧序号) 和 time (0.0~1.0 归一化时间)
+                if not hasattr(viewpoint_cam, 'fid'):
+                    viewpoint_cam.fid = frame_id
+                if not hasattr(viewpoint_cam, 'time'):
+                    viewpoint_cam.time = frame_id / max(1, len(train_cameras) - 1)
+                # ======================================================================
                 gt_image = viewpoint_cam.original_image.cuda()
                 
                 # 获取混合掩码 (包含 3D静态背景 + 当前存活的4D高斯)

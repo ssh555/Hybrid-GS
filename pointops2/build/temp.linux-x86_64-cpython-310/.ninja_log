@@ -1,0 +1,22 @@
+# ninja log v7
+1	9995	1773299607104762935	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/grouping/grouping_cuda.o	db3c35d4985461c0
+1	10510	1773299607104995796	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/interpolation/interpolation_cuda.o	a2d7ccce8534a38e
+3	11404	1773299607106738328	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/subtraction/subtraction_cuda.o	b28c60d0bd749c27
+1	13927	1773299607104625636	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/attention_v2/attention_cuda_v2.o	13d25f94d93f5efb
+0	15468	1773299607103074785	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/aggregation/aggregation_cuda.o	110fedabb2e69db0
+0	17557	1773299607103993348	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/aggregation/aggregation_cuda_kernel.o	3f2700880d1f2a6b
+1	17580	1773299607105242635	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/knnquery/knnquery_cuda.o	55a69e5e12abfc20
+3	17926	1773299607106487658	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/sampling/sampling_cuda.o	f2c729d54efa7279
+0	18035	1773299607104167589	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/attention/attention_cuda.o	98d61f4a580998a0
+1	18317	1773299607104500640	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/attention_v2/attention_cuda_kernel_v2.o	13d9c20f7c6baef9
+2	18352	1773299607105819145	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/rpe/relative_pos_encoding_cuda.o	d83211d4b46446e6
+2	18502	1773299607106286205	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/rpe_v2/relative_pos_encoding_cuda_v2.o	2c04ff7ac1e676c1
+1	18913	1773299607105170123	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/interpolation/interpolation_cuda_kernel.o	4fce025d9a47f7d5
+2	19077	1773299607106188834	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/rpe_v2/relative_pos_encoding_cuda_kernel_v2.o	d4de8199e637a6ca
+2	19625	1773299607106083286	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/rpe/relative_pos_encoding_cuda_kernel.o	51eff1ba8ba95264
+1	20167	1773299607104878762	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/grouping/grouping_cuda_kernel.o	f918112b5002d455
+3	20516	1773299607106838424	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/subtraction/subtraction_cuda_kernel.o	e90691ee1638f1fd
+3	20907	1773299607106626529	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/sampling/sampling_cuda_kernel.o	59ff93e95637b9e4
+0	21594	1773299607104347951	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/attention/attention_cuda_kernel.o	80b7163a792c813b
+2	22568	1773299607105422750	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/knnquery/knnquery_cuda_kernel.o	42be8af2b03f5484
+2	26196	1773299607105493400	/home/ssh555/BiShe/Code/Hybrid-GS/pointops2/build/temp.linux-x86_64-cpython-310/src/pointops_api.o	1b3bb6b1587dc05c

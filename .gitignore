@@ -3,3 +3,5 @@ changes.diff
 *.diff
 colmap/**
 colmap
+output/**
+output

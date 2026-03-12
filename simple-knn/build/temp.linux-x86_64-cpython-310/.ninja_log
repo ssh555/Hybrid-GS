@@ -1,0 +1,4 @@
+# ninja log v7
+0	5637	1773299541880126302	/home/ssh555/BiShe/Code/Hybrid-GS/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o	16fba003895a7e80
+0	8705	1773299541878794980	/home/ssh555/BiShe/Code/Hybrid-GS/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o	bd0d5514243bfa33
+0	22414	1773299541880264687	/home/ssh555/BiShe/Code/Hybrid-GS/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o	6e550ec27f19a254
