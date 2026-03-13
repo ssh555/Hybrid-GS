@@ -176,6 +176,11 @@ class GaussianModel:
                 self.static_max_radii2D,
                 self.static_xyz_gradient_accum,
                 self.static_denom
+
+                # [新增：HybridGS 专属保存]
+                getattr(self, '_start_frame', torch.empty(0)),
+                getattr(self, '_expire_frame', torch.empty(0)),
+                getattr(self, '_mask_dynamic', torch.empty(0))
             )
     
     def restore(self, model_args, training_args):
@@ -220,7 +225,14 @@ class GaussianModel:
             self.static_opacity,
             self.static_max_radii2D,
             self.static_denom,
-            self.static_xyz_gradient_accum) = model_args
+            self.static_xyz_gradient_accum,
+            # [新增：HybridGS 专属恢复]
+            start_frame, 
+            expire_frame, 
+            mask_dynamic) = model_args
+            self._start_frame = start_frame
+            self._expire_frame = expire_frame
+            self._mask_dynamic = mask_dynamic
         if training_args is not None:
             self.training_setup(training_args)
             self.xyz_gradient_accum = xyz_gradient_accum
