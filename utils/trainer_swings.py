@@ -95,10 +95,6 @@ class TrainerSWinGS(Trainer4DGS):
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
         print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
-        # 记录 TEST JSON 日志
-        log_path = os.path.join(self.args.model_path, "test_metrics.json")
-        self.metrics_tracker.save_log(log_path)
-        print(f"测试完成！软硬约束指标与模型已保存至 {log_path}。")
 
 
     def train(self):

@@ -63,8 +63,9 @@ class Trainer4DGS(BaseTrainer):
         if not test_cameras: return
             
         total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
-        for viewpoint_cam in tqdm(test_cameras, desc="Testing"):
-            gt_image = viewpoint_cam.original_image.cuda()
+        for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
+            gt_image, viewpoint_cam = batch_data
+            gt_image = gt_image.cuda()
             
             render_pkg, fps = self.metrics_tracker.measure_fps(
                 render, viewpoint_cam, self.gaussians, self.pipe, self.background
@@ -80,10 +81,6 @@ class Trainer4DGS(BaseTrainer):
         avg_fps = total_fps / len(test_cameras)
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
-        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
-        log_path = os.path.join(self.args.model_path, "test_metrics.json")
-        self.metrics_tracker.save_log(log_path)
-        print(f"测试完成！指标已保存至 {log_path}")
 
     def train(self):
         print(f"\n[Trainer4DGS] 开始标准 3D4DGS 训练，总迭代次数: {self.opt.iterations}")

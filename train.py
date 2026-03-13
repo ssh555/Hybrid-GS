@@ -236,7 +236,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--exhaust_test", action="store_true")
     parser.add_argument("--val", action="store_true", default=False)
-    
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[6_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[6_000])
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
         
