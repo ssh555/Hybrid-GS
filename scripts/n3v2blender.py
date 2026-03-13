@@ -313,7 +313,6 @@ if __name__ == '__main__':
     N = poses_bounds.shape[0]
 
     print(f'[INFO] loaded {len(images)} images from {len(cams)} videos, {N} poses_bounds as {poses_bounds.shape}')
-
     assert N == len(cams)
 
     poses = poses_bounds[:, :15].reshape(-1, 3, 5) # (N, 3, 5)

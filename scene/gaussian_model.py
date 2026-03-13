@@ -175,7 +175,7 @@ class GaussianModel:
                 self.static_opacity,
                 self.static_max_radii2D,
                 self.static_xyz_gradient_accum,
-                self.static_denom
+                self.static_denom,
 
                 # [新增：HybridGS 专属保存]
                 getattr(self, '_start_frame', torch.empty(0)),
