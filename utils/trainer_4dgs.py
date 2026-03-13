@@ -241,10 +241,8 @@ class Trainer4DGS(BaseTrainer):
                         progress_bar.set_postfix({"Loss": f"{loss:.4f}", "Pts(4D)": self.gaussians.get_xyz.shape[0], "Pts(3D)": self.gaussians.get_static_xyz.shape[0] if static else 0})
                         progress_bar.update(10)
                     
-                    if iteration in self.testing_iterations:
+                    if iteration == self.opt.iterations:
                         self.evaluate(iteration)
-                        
-                    if iteration in self.saving_iterations:
                         torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
                         self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
                         

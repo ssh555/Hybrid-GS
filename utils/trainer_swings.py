@@ -260,11 +260,9 @@ class TrainerSWinGS(Trainer4DGS):
                     postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]", "Pts(4D)": self.gaussians.get_xyz.shape[0]}
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
-                
-                if iteration in self.testing_iterations:
+
+                if iteration == self.opt.iterations:
                     self.evaluate(iteration)
-                    
-                if iteration in self.saving_iterations:
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
                     self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
