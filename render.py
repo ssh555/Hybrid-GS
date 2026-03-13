@@ -1,5 +1,5 @@
 # 统一渲染与3D漫游入口
-# python render.py --config ./configs/n3v/3D4DGS.yaml
+# python render.py --config ./configs/n3v/3D4DGS.yaml  --start_checkpoint ./output/3d4dgs/你的模型名/chkpnt_30000.pth
 # 文件：render.py
 import os
 import torch
@@ -49,7 +49,7 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
         checkpoint = os.path.join(dataset.model_path, "chkpnt_30000.pth")
     
     print(f"[渲染器] 正在加载 Checkpoint: {checkpoint}")
-    (model_params, first_iter) = torch.load(checkpoint)
+    (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
     
     # 2. 加载场景 (借用 Scene 获取训练集的相机分布作为运镜关键帧)
@@ -102,7 +102,6 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     
     parser.add_argument("--config", type=str, required=True, help="配置文件的路径")
-    parser.add_argument("--model_type", type=str, default="hybrid_gs")
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--rot_4d", action="store_true", default=True)
