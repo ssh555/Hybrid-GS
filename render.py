@@ -61,7 +61,7 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
     # 选取极值点作为关键帧 (例如：第0帧，中间帧，最后一帧)
     num_cams = len(train_cameras)
     keyframe_indices = [0, num_cams//4, num_cams//2, int(num_cams*0.75), num_cams-1]
-    keyframes = [train_cameras[i] for i in keyframe_indices]
+    keyframes = [train_cameras[i][1] for i in keyframe_indices]
     
     # 生成 300 帧的平滑漫游轨迹
     num_render_frames = 300 
