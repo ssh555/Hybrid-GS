@@ -1,5 +1,5 @@
 # 统一渲染与3D漫游入口
-# python render.py --config ./configs/n3v/3D4DGS.yaml --start_checkpoint ./output/3d4dgs/你的模型名/chkpnt_30000.pth
+# python render.py --config ./configs/n3v/3D4DGS.yaml
 # 文件：render.py
 import os
 import torch
