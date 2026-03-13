@@ -36,12 +36,19 @@ class Trainer4DGS(BaseTrainer):
             time_duration=args.time_duration
         )
         self.gaussians.training_setup(opt)
+        
+        # 删除self.args.model_path路径下的chkpnt_*.pth和point_cloud_*.ply文件，避免与当前训练产生混淆
+        for filename in os.listdir(self.args.model_path):
+            if filename.startswith("chkpnt_") and filename.endswith(".pth"):
+                os.remove(os.path.join(self.args.model_path, filename))
+            elif filename.startswith("point_cloud_") and filename.endswith(".ply"):
+                os.remove(os.path.join(self.args.model_path, filename))
 
         # 3. 恢复权重
         self.first_iter = 0
         if self.args.start_checkpoint and os.path.exists(self.args.start_checkpoint):
             print(f"[Trainer4DGS] 恢复权重: {self.args.start_checkpoint}")
-            (model_params, self.first_iter) = torch.load(self.args.start_checkpoint)
+            (model_params, self.first_iter) = torch.load(self.args.start_checkpoint, weights_only=False)
             self.gaussians.restore(model_params, opt)
             
         # 4. 背景与环境光贴图
