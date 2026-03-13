@@ -48,13 +48,13 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
         # 默认加载训练完成的最后一步
         checkpoint = os.path.join(dataset.model_path, "chkpnt_30000.pth")
     
-    print(f"[渲染器] 正在加载 Checkpoint: {checkpoint}")
+    print("[渲染器] 正在加载场景相机...")
+    scene = Scene(dataset, gaussians, shuffle=False)
+    train_cameras = scene.getTrainCameras()
+
+    print(f"[渲染器] 正在加载并覆盖 Checkpoint: {checkpoint}")
     (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
-    
-    # 2. 加载场景 (借用 Scene 获取训练集的相机分布作为运镜关键帧)
-    scene = Scene(dataset, gaussians, load_iteration=first_iter, shuffle=False)
-    train_cameras = scene.getTrainCameras()
     
     # 3. 规划运镜轨迹
     print("[渲染器] 正在规划 B-Spline 和 Slerp 平滑运镜轨迹...")
