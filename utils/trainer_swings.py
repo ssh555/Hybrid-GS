@@ -214,11 +214,6 @@ class TrainerSWinGS(Trainer4DGS):
 
             # =============== 致密化与优化器 ===============
             with torch.no_grad():
-                if iteration % 100 == 0:
-                    num_4d = self.gaussians.get_xyz.shape[0]
-                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
-                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
-
                 if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if static:
@@ -266,6 +261,9 @@ class TrainerSWinGS(Trainer4DGS):
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
                     self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
+                    num_4d = self.gaussians.get_xyz.shape[0]
+                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
+                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
                     
         progress_bar.close()
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
