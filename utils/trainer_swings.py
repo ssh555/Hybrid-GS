@@ -62,8 +62,9 @@ class TrainerSWinGS(Trainer4DGS):
             
         total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
         
-        for idx, viewpoint_cam in enumerate(tqdm(test_cameras, desc="Testing")):
-            gt_image = viewpoint_cam.original_image.cuda()
+        for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
+            gt_image, viewpoint_cam = batch_data
+            gt_image = gt_image.cuda()
             
             # 优先找 fid，找不到就直接用当前测试图片的顺序索引 idx
             frame_id = getattr(viewpoint_cam, 'fid', idx)
