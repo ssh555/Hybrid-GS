@@ -62,14 +62,13 @@ class TrainerSWinGS(Trainer4DGS):
             
         total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
         
-        for viewpoint_cam in tqdm(test_cameras, desc="Testing"):
+        for idx, viewpoint_cam in enumerate(tqdm(test_cameras, desc="Testing")):
             gt_image = viewpoint_cam.original_image.cuda()
             
-            # 1. 提取当前测试相机的真实帧号
-            # 注意：COLMAP 相机的 uid 通常对应它在整个序列里的先后顺序
-            frame_id = getattr(viewpoint_cam, 'fid', getattr(viewpoint_cam, 'uid', 0))
+            # 优先找 fid，找不到就直接用当前测试图片的顺序索引 idx
+            frame_id = getattr(viewpoint_cam, 'fid', idx)
             
-            # 2. 获取针对当前帧的存活掩码
+            # 获取特定帧的干净掩码，过滤掉不在当前时间出生的点
             active_mask = self._get_active_dynamic_mask(frame_id)
             
             # 3. 必须把 active_dynamic_mask 传给渲染器！否则会满屏残影！
@@ -101,7 +100,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.metrics_tracker.save_log(log_path)
         print(f"测试完成！软硬约束指标与模型已保存至 {log_path}。")
 
-        
+
     def train(self):
         print(f"\n[TrainerSWinGS] 开始长序列滑动窗口训练，窗口大小: {self.swin_size}")
         self.metrics_tracker.start_timer()
