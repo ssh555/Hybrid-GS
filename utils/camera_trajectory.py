@@ -57,7 +57,7 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
 
     # 2. Slerp 插值旋转四元数 (Rotation)
     slerp = R_scipy.from_quat(R_quats)
-    spline_R = slerp.as_spline() # scipy 1.10+ 支持直接四元数样条插值
+    spline_R = slerp # scipy 1.10+ 支持直接四元数样条插值
 
     # 生成平滑轨迹
     smooth_T = spline_T(target_times)
