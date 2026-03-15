@@ -262,6 +262,7 @@ class TrainerSWinGS(Trainer4DGS):
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
                     self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
+                    print(f'[INFO] {self.args.model_path} 已保存当前模型权重和点云数据！')
                     num_4d = self.gaussians.get_xyz.shape[0]
                     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
                     self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
