@@ -1,19 +1,19 @@
 # 统一渲染与3D漫游入口
-# python render.py --config ./configs/n3v/3D4DGS.yaml  --start_checkpoint ./output/3d4dgs/你的模型名/chkpnt_30000.pth
+# python render.py --config ./configs/n3v/3D4DGS.yaml  --start_checkpoint ./output/3d4dgs/你的模型名/chkpnt_6000.pth
 # 文件：render.py
 import os
 import torch
 import imageio
+import numpy as np  # [修复1] 补充缺失的 numpy 库
 from tqdm import tqdm
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 
-from arguments import ModelParams, PipelineParams, get_combined_args
+from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
 from utils.camera_trajectory import generate_smooth_trajectory
-from utils.image_utils import easy_cmap
 
 def get_inference_active_mask(gaussians, frame_id):
     """
@@ -21,7 +21,7 @@ def get_inference_active_mask(gaussians, frame_id):
     确保在漫游视频中，只渲染 3D 静态背景和在当前 frame_id 存活的 4D 前景高斯。
     """
     if not hasattr(gaussians, '_start_frame') or gaussians._start_frame.numel() == 0:
-        return None # 如果是原版 3DGS，不过滤
+        return None 
 
     active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
     
@@ -40,12 +40,13 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     
-    gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration, 
+    # [修复2] 安全获取 sh_degree
+    sh_degree = dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3
+    gaussians = GaussianModel(sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration, 
                               rot_4d=args.rot_4d, force_sh_3d=args.force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
     
     checkpoint = args.start_checkpoint
     if not checkpoint:
-        # 默认加载训练完成的最后一步
         checkpoint = os.path.join(dataset.model_path, "chkpnt_30000.pth")
     
     print("[渲染器] 正在加载场景相机...")
@@ -58,9 +59,10 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
     
     # 3. 规划运镜轨迹
     print("[渲染器] 正在规划 B-Spline 和 Slerp 平滑运镜轨迹...")
-    # 选取极值点作为关键帧 (例如：第0帧，中间帧，最后一帧)
     num_cams = len(train_cameras)
     keyframe_indices = [0, num_cams//4, num_cams//2, int(num_cams*0.75), num_cams-1]
+    
+    # 获取纯相机对象，脱离 (image, cam) 元组
     keyframes = [train_cameras[i][1] for i in keyframe_indices]
     
     # 生成 300 帧的平滑漫游轨迹
@@ -75,8 +77,18 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
     frames_rgb = []
     
     for idx, cam in enumerate(tqdm(trajectory, desc="Rendering Frames")):
-        # 获取当前帧的 HybridGS 过滤掩码
-        active_mask = get_inference_active_mask(gaussians, getattr(cam, 'uid', 0))
+        
+        # [修复3] 极其关键：为生成的平滑相机强行注入时间戳！
+        # 让这 300 帧的相机在漫游空间的同时，时间流逝也映射到原视频的 0 ~ 总帧数。
+        progress_ratio = idx / max(1, num_render_frames - 1)
+        frame_id = int(progress_ratio * (num_cams - 1))
+        
+        # 4DGS 需要靠这两个属性进行形变推断！
+        cam.fid = frame_id
+        cam.time = progress_ratio
+        
+        # 获取当前帧的 HybridGS 生命周期掩码
+        active_mask = get_inference_active_mask(gaussians, frame_id)
         
         # 前向渲染
         render_pkg = render(cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
@@ -86,9 +98,6 @@ def render_video(dataset: ModelParams, pipe: PipelineParams, args):
         img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
         
         frames_rgb.append(img_np)
-        
-        # (可选) 将单帧图像保存到磁盘
-        # imageio.imwrite(os.path.join(render_dir, f"{cam.image_name}.png"), img_np)
 
     # 5. 合成 MP4 视频
     video_path = os.path.join(dataset.model_path, f"{args.model_type}_roaming.mp4")
@@ -102,6 +111,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     
     parser.add_argument("--config", type=str, required=True, help="配置文件的路径")
+    parser.add_argument("--model_type", type=str, default="hybrid_gs")
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--rot_4d", action="store_true", default=True)
