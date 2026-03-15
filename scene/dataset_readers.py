@@ -398,7 +398,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
         
     # ============== [HybridGS 加速收敛补丁] ==============
     # 强行生成 100,000 个随机点，铺满相机的包围盒，跳过漫长的分裂期
-    num_pts = 100_000
+    # num_pts = 100_000
     print(f"🚀 [加速补丁] 正在为 Blender 数据集强行注入 {num_pts} 个随机初始点...")
     
     # 根据相机的范围生成随机坐标 (通常 Blender 数据集在 -1.3 到 1.3 之间)
