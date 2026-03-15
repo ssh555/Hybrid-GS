@@ -33,7 +33,10 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
         else:
             T_list.append(cam.T)  # 它已经是 numpy 数组了，直接 append
         # 3DGS 中的 R 是 W2C 的转置，先转回来，再用 scipy 处理
-        r_mat = cam.R.cpu().numpy().T 
+        if hasattr(cam.R, 'cpu'):
+            r_mat = cam.R.cpu().numpy().T
+        else:
+            r_mat = cam.R.T  # 它已经是 numpy 数组了，直接转置
         R_quats.append(R_scipy.from_matrix(r_mat).as_quat()) # 转为四元数 [x, y, z, w]
         fovx_list.append(cam.FoVx)
         timestamp_list.append(cam.timestamp)
