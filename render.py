@@ -1,10 +1,8 @@
-# 统一渲染与3D漫游入口
-# python render.py --config ./configs/n3v/3D4DGS.yaml  --start_checkpoint ./output/3d4dgs/你的模型名/chkpnt_6000.pth
-# 文件：render.py
+# 纯净版：自动分组单视角动态渲染
 import os
 import torch
 import imageio
-import numpy as np  # [修复1] 补充缺失的 numpy 库
+import numpy as np
 from tqdm import tqdm
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
@@ -13,122 +11,88 @@ from omegaconf.dictconfig import DictConfig
 from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
-from utils.camera_trajectory import generate_smooth_trajectory
-
-def get_inference_active_mask(gaussians, frame_id):
-    """
-    [HybridGS 核心] 推理时的生命周期掩码过滤器。
-    确保在漫游视频中，只渲染 3D 静态背景和在当前 frame_id 存活的 4D 前景高斯。
-    """
-    if not hasattr(gaussians, '_start_frame') or gaussians._start_frame.numel() == 0:
-        return None 
-
-    active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
-    
-    if hasattr(gaussians, '_mask_dynamic'):
-        # 1 是被硬约束冻结的静态背景 (永远可见)，2/0 是动态点 (受生命周期限制)
-        final_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
-        return final_mask
-    return active_mask
 
 @torch.no_grad()
-def render_video(dataset: ModelParams, pipe: PipelineParams, args):
-    """加载模型，生成平滑轨迹，并渲染输出 MP4 视频"""
-    print(f"[渲染器] 正在初始化 {args.model_type} 模型渲染管线...")
+def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
+    print(f"[渲染器] 正在初始化 4DGS 单视角分离渲染管线...")
     
-    # 1. 初始化模型并加载权重
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     
-    # [修复2] 安全获取 sh_degree
     sh_degree = dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3
     gaussians = GaussianModel(sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration, 
                               rot_4d=args.rot_4d, force_sh_3d=args.force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
     
-    checkpoint = args.start_checkpoint
-    if not checkpoint:
-        checkpoint = os.path.join(dataset.model_path, "chkpnt_30000.pth")
-    
-    print("[渲染器] 正在加载场景相机...")
     scene = Scene(dataset, gaussians, shuffle=False)
-    train_cameras = scene.getTrainCameras()
+    train_cameras = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
 
-    print(f"[渲染器] 正在加载并覆盖 Checkpoint: {checkpoint}")
+    checkpoint = args.start_checkpoint or os.path.join(dataset.model_path, "chkpnt_6000.pth")
+    print(f"[渲染器] 正在覆盖模型权重: {checkpoint}")
     (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
     
-    # 3. 规划运镜轨迹
-    print("[渲染器] 正在规划 B-Spline 和 Slerp 平滑运镜轨迹...")
-    num_cams = len(train_cameras)
-    keyframe_indices = [0, num_cams//4, num_cams//2, int(num_cams*0.75), num_cams-1]
+    # ==========================================
+    # 核心逻辑：智能分离出【同一个视角】的所有时间帧
+    # ==========================================
+    print(f"[渲染器] 数据集共有 {len(train_cameras)} 个样本。正在智能聚类单视角...")
     
-    # 获取纯相机对象，脱离 (image, cam) 元组
-    keyframes = [train_cameras[i][1] for i in keyframe_indices]
+    # 我们以第 1 个相机的空间位置为基准 (View 0)
+    base_cam = train_cameras[0]
+    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
     
-    # 生成 300 帧的平滑漫游轨迹
-    num_render_frames = 300 
-    trajectory = generate_smooth_trajectory(keyframes, num_frames=num_render_frames)
+    view_0_cameras = []
     
-    # 4. 渲染视频帧
-    print("[渲染器] 开始渲染漫游视频...")
-    render_dir = os.path.join(dataset.model_path, "roaming_renders")
+    for cam in train_cameras:
+        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
+        # 如果平移向量极度接近，说明是在同一个物理位置的相机（同一个视角）
+        if np.allclose(base_T, cam_T, atol=1e-3):
+            view_0_cameras.append(cam)
+            
+    # 按时间戳或帧号(fid)排序，确保时间是顺流的
+    view_0_cameras.sort(key=lambda x: getattr(x, 'fid', getattr(x, 'timestamp', 0)))
+    
+    print(f"[渲染器] 成功提取到基准视角的 {len(view_0_cameras)} 帧连续画面！")
+    
+    # ==========================================
+    # 开始渲染并保存
+    # ==========================================
+    render_dir = os.path.join(dataset.model_path, "single_view_renders")
     os.makedirs(render_dir, exist_ok=True)
-    
     frames_rgb = []
     
-    for idx, cam in enumerate(tqdm(trajectory, desc="Rendering Frames")):
-        
-        # [修复3] 极其关键：为生成的平滑相机强行注入时间戳！
-        # 让这 300 帧的相机在漫游空间的同时，时间流逝也映射到原视频的 0 ~ 总帧数。
-        progress_ratio = idx / max(1, num_render_frames - 1)
-        frame_id = int(progress_ratio * (num_cams - 1))
-        
-        # 4DGS 需要靠这两个属性进行形变推断！
-        cam.fid = frame_id
-        cam.time = progress_ratio
-        
-        # 获取当前帧的 HybridGS 生命周期掩码
-        active_mask = get_inference_active_mask(gaussians, frame_id)
-        
-        # 前向渲染
-        render_pkg = render(cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-        
-        # 提取 RGB 图像并转换为 0-255 的 numpy 数组
+    for idx, cam in enumerate(tqdm(view_0_cameras, desc="Rendering Sequence")):
+        render_pkg = render(cam, gaussians, pipe, background)
         rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
         img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
         
+        # 使用相机自带的 image_name (包含视角和帧号信息) 进行标注保存！
+        cam_name = getattr(cam, 'image_name', f"frame_{idx:03d}")
+        imageio.imwrite(os.path.join(render_dir, f"{cam_name}.png"), img_np)
         frames_rgb.append(img_np)
 
-    # 5. 合成 MP4 视频
-    video_path = os.path.join(dataset.model_path, f"{args.model_type}_roaming.mp4")
-    print(f"\n[渲染器] 正在编码视频: {video_path}")
-    imageio.mimwrite(video_path, frames_rgb, fps=30, quality=8)
-    print("[渲染器] 视频漫游渲染圆满完成！")
+    # 合成对照视频，如果是21帧，通常使用 10 帧/秒 的速度方便观察
+    video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
+    print(f"\n[渲染器] 正在合成当前视角的动态视频: {video_path}")
+    imageio.mimwrite(video_path, frames_rgb, fps=10, quality=8)
+    print(f"[渲染器] 圆满完成！请去 {render_dir} 文件夹查看带名称标注的序列帧！")
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="HybridGS 混合高斯漫游视频渲染器")
+    parser = ArgumentParser()
     lp = ModelParams(parser)
     pp = PipelineParams(parser)
-    
-    parser.add_argument("--config", type=str, required=True, help="配置文件的路径")
+    parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--rot_4d", action="store_true", default=True)
     parser.add_argument("--force_sh_3d", action="store_true", default=True)
-    parser.add_argument("--start_checkpoint", type=str, default=None, help="指定 pth 权重路径")
+    parser.add_argument("--start_checkpoint", type=str, required=True)
     
     args = parser.parse_args()
-    
-    # 继承 YAML 配置
     cfg = OmegaConf.load(args.config)
     def recursive_merge(key, host):
         if isinstance(host[key], DictConfig):
-            for key1 in host[key].keys():
-                recursive_merge(key1, host[key])
-        else:
-            if hasattr(args, key):
-                setattr(args, key, host[key])
-    for k in cfg.keys():
-        recursive_merge(k, cfg)
+            for k in host[key].keys(): recursive_merge(k, host[key])
+        elif hasattr(args, key): setattr(args, key, host[key])
+    for k in cfg.keys(): recursive_merge(k, cfg)
         
-    render_video(lp.extract(args), pp.extract(args), args)
+    simple_render(lp.extract(args), pp.extract(args), args)
