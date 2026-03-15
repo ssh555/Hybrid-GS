@@ -396,6 +396,24 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
                               normals=normals,
                               time=times)
         
+    # ============== [HybridGS 加速收敛补丁] ==============
+    # 强行生成 100,000 个随机点，铺满相机的包围盒，跳过漫长的分裂期
+    num_pts = 100_000
+    print(f"🚀 [加速补丁] 正在为 Blender 数据集强行注入 {num_pts} 个随机初始点...")
+    
+    # 根据相机的范围生成随机坐标 (通常 Blender 数据集在 -1.3 到 1.3 之间)
+    # 我们生成一个边长为 2.6 的随机点云立方体
+    xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+    
+    # 赋予随机的基础颜色 (灰色系或随机彩色均可)
+    shs = np.random.random((num_pts, 3)) / 255.0
+    
+    # 组装为基础点云对象 (引入 BasicPointCloud，如果文件顶部没导包需要确认一下)
+    # 通常顶部有: from scene.dataset_readers import BasicPointCloud 或者类似定义
+    pcd = BasicPointCloud(points=xyz, colors=shs, normals=np.zeros((num_pts, 3)))
+    # =====================================================
+
+    # 返回场景信息，确保传入的是我们刚刚造出来的 10万大军 pcd
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
