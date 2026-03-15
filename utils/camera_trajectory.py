@@ -6,8 +6,9 @@ from scipy.spatial.transform import Rotation as R_scipy
 from scipy.interpolate import CubicSpline
 from scene.cameras import Camera
 import copy
-# [新增导入] 引入 3DGS 投影矩阵计算工具
+# 引入 3DGS 投影矩阵计算工具
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
+from scipy.spatial.transform import Slerp
 
 def generate_smooth_trajectory(keyframes, num_frames=300):
     """
@@ -31,13 +32,14 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
         if hasattr(cam.T, 'cpu'):
             T_list.append(cam.T.cpu().numpy())
         else:
-            T_list.append(cam.T)  # 它已经是 numpy 数组了，直接 append
-        # 3DGS 中的 R 是 W2C 的转置，先转回来，再用 scipy 处理
+            T_list.append(cam.T)
+            
         if hasattr(cam.R, 'cpu'):
             r_mat = cam.R.cpu().numpy().T
         else:
-            r_mat = cam.R.T  # 它已经是 numpy 数组了，直接转置
-        R_quats.append(R_scipy.from_matrix(r_mat).as_quat()) # 转为四元数 [x, y, z, w]
+            r_mat = cam.R.T 
+            
+        R_quats.append(R_scipy.from_matrix(r_mat).as_quat())
         fovx_list.append(cam.FoVx)
         timestamp_list.append(cam.timestamp)
         frame_id_list.append(getattr(cam, 'uid', 0))
@@ -49,22 +51,22 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
 
     # 1. 样条插值平移向量 (Translation) 和 视场角 (FOV) 及 时间戳
     spline_T = CubicSpline(times, T_list)
-    spline_fovx = CubicSpline(times, fovx_list)
-    spline_timestamp = CubicSpline(times, timestamp_list)
+    smooth_T = spline_T(target_times)  # [修复] 加上了遗漏的平移计算
     
-    # 注意：真实帧号 (frame_id) 只能线性插值并取整，用于 HybridGS 生命周期掩码提取
+    spline_fovx = CubicSpline(times, fovx_list)
+    smooth_fovx = spline_fovx(target_times)
+    
+    spline_timestamp = CubicSpline(times, timestamp_list)
+    smooth_timestamp = spline_timestamp(target_times)
+    
     interp_frame_ids = np.interp(target_times, times, frame_id_list).astype(int)
 
     # 2. Slerp 插值旋转四元数 (Rotation)
-    slerp = R_scipy.from_quat(R_quats)
-    spline_R = slerp # scipy 1.10+ 支持直接四元数样条插值
-
-    # 生成平滑轨迹
-    smooth_T = spline_T(target_times)
-    smooth_R_quats = spline_R(target_times)
-    smooth_R_mats = R_scipy.from_quat(smooth_R_quats).as_matrix()
-    smooth_fovx = spline_fovx(target_times)
-    smooth_timestamp = spline_timestamp(target_times)
+    # [修复] 彻底理顺 Slerp 插值逻辑，不再重复装箱拆箱
+    base_rotations = R_scipy.from_quat(R_quats)
+    real_interpolator = Slerp(times, base_rotations) 
+    smooth_rotations = real_interpolator(target_times)
+    smooth_R_mats = smooth_rotations.as_matrix()
 
     trajectory = []
     base_cam = keyframes[0] # 用第一个相机作为模板
@@ -83,26 +85,19 @@ def generate_smooth_trajectory(keyframes, num_frames=300):
         new_cam.uid = int(interp_frame_ids[i])
         new_cam.image_name = f"render_frame_{i:04d}"
         
-        # ===================================================================
-        # [必须新增的修复：手动刷新光栅化引擎依赖的投影矩阵！]
-        # 如果不更新这三个矩阵，渲染出的视频将是定格在第一帧的静止画面！
-        # ===================================================================
-        # 1. 重新计算 World-to-View 矩阵 (W2C)
+        # 重新计算渲染引擎依赖的底层矩阵
         new_cam.world_view_transform = torch.tensor(
             getWorld2View2(R_matrix, T_vector, np.array([0.0, 0.0, 0.0]), 1.0)
         ).transpose(0, 1).cuda()
         
-        # 2. 重新计算投影矩阵 (考虑可能微变的 FoVx)
         new_cam.projection_matrix = getProjectionMatrix(
             znear=new_cam.znear, zfar=new_cam.zfar, fovX=new_cam.FoVx, fovY=new_cam.FoVy
         ).transpose(0, 1).cuda()
         
-        # 3. 重新计算全投影矩阵 (W2C * Proj)
         new_cam.full_proj_transform = (
             new_cam.world_view_transform.unsqueeze(0).bmm(new_cam.projection_matrix.unsqueeze(0))
         ).squeeze(0)
         
-        # 4. 更新相机光心坐标
         new_cam.camera_center = new_cam.world_view_transform.inverse()[3, :3]
 
         trajectory.append(new_cam)
