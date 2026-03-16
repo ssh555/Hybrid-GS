@@ -1,4 +1,4 @@
-# 纯净版：自动分组单视角动态渲染
+# 纯净版：自动分组单视角动态渲染 (严格空间判定版)
 import os
 import torch
 import imageio
@@ -39,13 +39,16 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
     # 我们以第 1 个相机的空间位置为基准 (View 0)
     base_cam = train_cameras[0]
     base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
+    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R # [新增] 获取基准相机的旋转矩阵
     
     view_0_cameras = []
     
     for cam in train_cameras:
         cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        # 如果平移向量极度接近，说明是在同一个物理位置的相机（同一个视角）
-        if np.allclose(base_T, cam_T, atol=1e-3):
+        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R # [新增] 获取当前相机的旋转矩阵
+        
+        # [核心修复] 必须位置(T)和旋转角度(R)都极其接近（误差小于1e-5），才被认定是绝对的同一个静态视角
+        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
             view_0_cameras.append(cam)
             
     # 按时间戳或帧号(fid)排序，确保时间是顺流的
@@ -70,10 +73,9 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
         imageio.imwrite(os.path.join(render_dir, f"{cam_name}.png"), img_np)
         frames_rgb.append(img_np)
 
-    # 合成对照视频，如果是21帧，通常使用 10 帧/秒 的速度方便观察
     video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
     print(f"\n[渲染器] 正在合成当前视角的动态视频: {video_path}")
-    imageio.mimwrite(video_path, frames_rgb, fps=10, quality=8)
+    imageio.mimwrite(video_path, frames_rgb, fps=24, quality=8)
     print(f"[渲染器] 圆满完成！请去 {render_dir} 文件夹查看带名称标注的序列帧！")
 
 if __name__ == "__main__":
