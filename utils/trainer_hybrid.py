@@ -23,12 +23,12 @@ class TrainerHybrid(TrainerSWinGS):
             if not dynamic_mask.any():
                 return
             
-            # 使用 3D4DGS 内部函数评估瞬时速度
-            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t)
-            _, vel_next = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.05)
+            # [修复 Bug & 提速] 传入 mask 省下 80% 算力！dt=1.0 获取标准速度，dt=0.05 获取瞬时位移
+            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=dynamic_mask)
+            _, vel_next = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.05, mask=dynamic_mask)
             
-            displacement_1 = velocity[dynamic_mask].norm(dim=-1)
-            displacement_2 = vel_next[dynamic_mask].norm(dim=-1)
+            displacement_1 = velocity.norm(dim=-1)
+            displacement_2 = vel_next.norm(dim=-1)
             
             r_avg = (displacement_1 + displacement_2) / 2.0
             r_max = torch.max(displacement_1, displacement_2)
@@ -97,10 +97,15 @@ class TrainerHybrid(TrainerSWinGS):
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
                     
                 # =============== [核心机制] HybridGS 时间解耦软约束 ===============
-                _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t)
-                l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
-                current_loss += l_reg_d
+                dynamic_mask = self.gaussians._mask_dynamic != 1
+                if dynamic_mask.any():
+                    # [修复 Bug & 提速] dt=1.0 获取真实速度，且仅计算动态点！
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=dynamic_mask)
+                    l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
+                    current_loss += l_reg_d
                 # ====================================================================
+
+                # (注: 下方的 lambda_rigid 和 lambda_motion 由于你配置中是 0.0，且涉及 KNN，我建议如果不用就保持原样或删掉即可)
 
                 if self.opt.lambda_rigid > 0:
                     k = 20

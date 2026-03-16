@@ -330,10 +330,26 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
     
-    def get_current_covariance_and_mean_offset(self, scaling_modifier = 1, timestamp = 0.0):
-        return self.covariance_activation(self.get_scaling_xyzt, scaling_modifier, 
+    def get_current_covariance_and_mean_offset(self, scaling_modifier = 1, timestamp = 0.0, mask = None):
+        # [HybridGS 核心提速补丁]：支持切片运算，彻底省去静态背景点海量的 4D 矩阵乘法
+        if mask is not None:
+            scaling_xyzt = self.get_scaling_xyzt[mask]
+            rot = self._rotation[mask]
+            rot_r = self._rotation_r[mask] if getattr(self, 'rot_4d', False) else None
+            t = self.get_t[mask]
+            
+            # 处理 timestamp 可能是标量或张量的情况
+            if isinstance(timestamp, torch.Tensor):
+                dt = timestamp[mask] - t
+            else:
+                dt = timestamp - t
+                
+            return self.covariance_activation(scaling_xyzt, scaling_modifier, rot, rot_r, dt=dt)
+        else:
+            # 原版逻辑，兼容渲染器
+            return self.covariance_activation(self.get_scaling_xyzt, scaling_modifier, 
                                                               self._rotation, 
-                                                              self._rotation_r,
+                                                              self._rotation_r if getattr(self, 'rot_4d', False) else None,
                                                               dt = timestamp - self.get_t)
 
     def construct_list_of_attributes(self):
