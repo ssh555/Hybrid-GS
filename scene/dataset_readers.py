@@ -399,9 +399,9 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
     # ============== [HybridGS 加速收敛补丁] ==============
     # 强行生成 100,000 个随机点，铺满相机的包围盒，跳过漫长的分裂期
     # num_pts = 100_000
-    # 取传入参数的一半，但为了防止显存溢出和噪点泛滥，最高绝不超过 10 万！
+    # 取传入参数的一半，但为了防止显存溢出和噪点泛滥，最高绝不超过 50 万！
     target_pts = int(num_pts)
-    init_seed_pts = min(int(target_pts / 2), 2000_000) 
+    init_seed_pts = min(int(target_pts / 2), 500_000) 
     
     print(f"🚀 [加速补丁] 传入目标点数 {target_pts}，正在安全注入 {init_seed_pts} 个随机初始点...")
     
