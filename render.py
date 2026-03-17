@@ -69,8 +69,8 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
         img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
         
         # 使用相机自带的 image_name (包含视角和帧号信息) 进行标注保存！
-        cam_name = getattr(cam, 'image_name', f"frame_{idx:03d}")
-        imageio.imwrite(os.path.join(render_dir, f"{cam_name}.png"), img_np)
+        # cam_name = getattr(cam, 'image_name', f"frame_{idx:03d}")
+        # imageio.imwrite(os.path.join(render_dir, f"{cam_name}.png"), img_np)
         frames_rgb.append(img_np)
 
     video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
