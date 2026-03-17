@@ -159,6 +159,10 @@ class TrainerHybrid(TrainerSWinGS):
             iter_end.record()
 
             with torch.no_grad():
+                if iteration % 100 == 0:
+                    num_4d = self.gaussians.get_xyz.shape[0]
+                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
+                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
                 # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
                 if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
                      self.robust_hard_constraint_classifier()
@@ -217,9 +221,6 @@ class TrainerHybrid(TrainerSWinGS):
                     os.makedirs(self.args.model_path, exist_ok=True)
                     torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
                     self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
-                    num_4d = self.gaussians.get_xyz.shape[0]
-                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
-                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
                     
         progress_bar.close()
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "hybridgs_metrics.json"))
