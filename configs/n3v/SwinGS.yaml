@@ -52,7 +52,7 @@ OptimizationParams:
   opacity_reset_interval: 30000
   densify_from_iter: 500 
   densify_until_iter: 15000
-  densify_grad_threshold: 0.0001
+  densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: -1
   final_prune_from_iter: -1
