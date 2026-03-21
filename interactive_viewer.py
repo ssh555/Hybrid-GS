@@ -177,52 +177,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
     server = viser.ViserServer(port=8080)
 
-    # 添加自定义 CSS 来固定显示尺寸
-    server.add_js_code(f"""
-        // 添加样式来固定渲染画面的尺寸
-        const style = document.createElement('style');
-        style.textContent = `
-            /* 固定背景图像容器尺寸 */
-            .viser-scene__background {{
-                width: {TARGET_W}px !important;
-                height: {TARGET_H}px !important;
-                max-width: {TARGET_W}px !important;
-                max-height: {TARGET_H}px !important;
-                margin: 0 auto !important;
-                background-color: black !important;
-            }}
-            
-            /* 确保图像按比例显示，不被拉伸 */
-            .viser-scene__background img {{
-                width: 100% !important;
-                height: 100% !important;
-                object-fit: contain !important;
-            }}
-            
-            /* 可选：添加边框效果 */
-            .viser-scene__background {{
-                border: 2px solid #333;
-                box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-            }}
-            
-            /* 调整 GUI 布局，让画面居中 */
-            .viser-app {{
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }}
-        `;
-        document.head.appendChild(style);
-        
-        // 监听窗口大小变化，保持居中
-        window.addEventListener('resize', () => {{
-            const bgElement = document.querySelector('.viser-scene__background');
-            if (bgElement) {{
-                bgElement.style.margin = '0 auto';
-            }}
-        }});
-    """)
-
     play_state = {"playing": False, "direction": 1}
 
     with server.gui.add_folder("🎬 控制台"):
