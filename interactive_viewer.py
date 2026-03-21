@@ -69,6 +69,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     gui_frame = server.gui.add_slider("🎬 时间轴 (Frame)", min=0, max=max_frames, step=1, initial_value=0)
     gui_res_scale = server.gui.add_slider("🖥️ 渲染画质缩放", min=0.1, max=1.0, step=0.1, initial_value=0.5)
     gui_hint = server.gui.add_markdown("🕹️ **操作指南**：\n- **左键拖拽**: 旋转视角\n- **右键拖拽**: 平移\n- **滚轮/WASD**: 前进后退")
+    gui_pose_info = server.gui.add_markdown("📍 **当前位姿**: `等待获取...`")
 
     # 4. 主渲染循环 (死循环，不断监听浏览器里相机的移动并实时渲染)
     while True:
@@ -77,6 +78,13 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         for client_id, client in clients.items():
             cam_state = client.camera
             
+            pos = cam_state.position
+            rot = cam_state.wxyz
+            gui_pose_info.content = (
+                f"📍 **坐标 (XYZ)**:\n `{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}`\n\n"
+                f"🔄 **旋转 (WXYZ)**:\n `{rot[0]:.2f}, {rot[1]:.2f}, {rot[2]:.2f}, {rot[3]:.2f}`"
+            )
+
             # 计算当前分辨率 (拖动时降低分辨率可以大幅提升流畅度)
             W = int(cam_state.aspect * 1000 * gui_res_scale.value)
             H = int(1000 * gui_res_scale.value)
@@ -99,9 +107,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             fovy = cam_state.fov
             fovx = 2 * math.atan(math.tan(fovy / 2) * cam_state.aspect)
             
-            # 构建 PyTorch 矩阵
-            world_view_transform = torch.tensor(getWorld2View2(R, T, np.array([0.0, 0.0, 0.0]), 1.0)).transpose(0, 1).cuda()
-            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            world_view_transform = torch.tensor(getWorld2View2(R, T, np.array([0.0, 0.0, 0.0]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=1000.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
             full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
             
             # 生成虚拟相机
