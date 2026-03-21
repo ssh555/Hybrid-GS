@@ -1,9 +1,7 @@
-# 文件名：interactive_viewer.py
-# pip install viser
-# 运行命令: python interactive_viewer.py --config ./configs/n3v/3D4DGS.yaml --start_checkpoint output/3d4dgs/miku_shaungxue_daxi/test_short/chkpnt_30000.pth
 import os
 import time
 import math
+import copy
 import torch
 import numpy as np
 import viser
@@ -15,119 +13,120 @@ from omegaconf.dictconfig import DictConfig
 from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
-from utils.graphics_utils import getWorld2View2, getProjectionMatrix
-
-class MiniCam:
-    """一个轻量级的虚拟相机类，用来欺骗 3DGS 渲染器，让它以为这是一个真实相机"""
-    def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
-        self.image_width = width
-        self.image_height = height
-        self.FoVy = fovy
-        self.FoVx = fovx
-        self.znear = znear
-        self.zfar = zfar
-        self.world_view_transform = world_view_transform
-        self.full_proj_transform = full_proj_transform
-        self.camera_center = world_view_transform.inverse()[3, :3]
-        # 4D 专属时间属性
-        self.fid = 0
-        self.time = 0.0
-        self.timestamp = 0.0
+from utils.graphics_utils import getProjectionMatrix
 
 @torch.no_grad()
 def main(dataset: ModelParams, pipe: PipelineParams, args):
     print(f"[引擎] 正在初始化 4DGS 实时漫游引擎...")
     
-    # 1. 初始化模型
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    # 1. 初始化模型 (深灰色背景防迷路)
+    bg_color = [1, 1, 1] if dataset.white_background else [0.2, 0.2, 0.2]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     
     sh_degree = dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3
     gaussians = GaussianModel(sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration, 
                               rot_4d=args.rot_4d, force_sh_3d=args.force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
     
+    # 2. 先初始化 Scene (让它生成废点)
+    scene = Scene(dataset, gaussians, shuffle=False)
+    
+    # 3. 强行加载你的 20000 步完美权重，覆盖废点！
     checkpoint = args.start_checkpoint
     print(f"[引擎] 正在加载模型权重: {checkpoint}")
     (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
     
-    # 2. 获取总帧数 (根据你之前说的，大约 200 帧左右)
-    # 我们可以通过读取原相机序列来获取准确的总帧数
-    scene = Scene(dataset, gaussians, shuffle=False)
+    # 获取所有的真实训练相机
     train_cameras = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
-    max_frames = max([getattr(c, 'fid', 0) for c in train_cameras]) 
-    if max_frames == 0: max_frames = 200 # 兜底默认值
+    max_frames = len(train_cameras) - 1
     
-    # 3. 启动 Viser Web 服务器
+    # 4. 启动 Viser Web 服务器
     server = viser.ViserServer(port=8080)
     print("\n" + "="*50)
     print(f"🚀 漫游引擎启动成功！")
     print(f"👉 请在浏览器中打开: http://localhost:8080")
     print("="*50 + "\n")
     
-    # 在网页 UI 上添加控制面板
-    gui_frame = server.gui.add_slider("🎬 时间轴 (Frame)", min=0, max=max_frames, step=1, initial_value=0)
-    gui_res_scale = server.gui.add_slider("🖥️ 渲染画质缩放", min=0.1, max=1.0, step=0.1, initial_value=0.5)
-    gui_hint = server.gui.add_markdown("🕹️ **操作指南**：\n- **左键拖拽**: 旋转视角\n- **右键拖拽**: 平移\n- **滚轮/WASD**: 前进后退")
+    # ==========================================
+    # 🌟 传送门：解决出生不在舞台 + 修正旋转圆心
+    # ==========================================
+    @server.on_client_connect
+    def _(client: viser.ClientHandle):
+        print("👋 浏览器已连接，正在将视角传送到舞台中心...")
+        c0 = train_cameras[0]
+        # 把 3DGS 坐标转换给 Viser
+        w2c = c0.world_view_transform.transpose(0, 1).cpu().numpy()
+        c2w = np.linalg.inv(w2c)
+        c2w[:3, 1:3] *= -1 # 翻转 Y 和 Z
+        
+        # 将用户传送到第一帧相机的物理位置
+        client.camera.position = c2w[:3, 3]
+        client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
+        # 【关键】设置相机的聚焦点为舞台中心 (0,0,0)，这样旋转操作就不会反了！
+        client.camera.look_at = (0.0, 0.0, 0.0)
+        client.scene.add_grid("grid", visible=False)
+
+    # 网页 UI 控制台
+    gui_frame = server.gui.add_slider("🎬 4D 时间轴", min=0, max=max_frames, step=1, initial_value=0)
+    gui_res_scale = server.gui.add_slider("🖥️ 画质缩放 (卡顿请调低)", min=0.1, max=1.0, step=0.1, initial_value=0.5)
+    server.gui.add_markdown("🕹️ **操作指南**：\n- **左键拖拽**: 围绕舞台旋转\n- **右键拖拽**: 平移相机\n- **滚轮**: 拉近拉远")
     gui_pose_info = server.gui.add_markdown("📍 **当前位姿**: `等待获取...`")
 
-    # 4. 主渲染循环 (死循环，不断监听浏览器里相机的移动并实时渲染)
     while True:
-        # 获取当前连接的用户（通常只有一个，就是你自己打开的浏览器）
         clients = server.get_clients()
         for client_id, client in clients.items():
             cam_state = client.camera
             
-            pos = cam_state.position
-            rot = cam_state.wxyz
-            gui_pose_info.content = (
-                f"📍 **坐标 (XYZ)**:\n `{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}`\n\n"
-                f"🔄 **旋转 (WXYZ)**:\n `{rot[0]:.2f}, {rot[1]:.2f}, {rot[2]:.2f}, {rot[3]:.2f}`"
-            )
-
-            # 计算当前分辨率 (拖动时降低分辨率可以大幅提升流畅度)
+            # 实时更新 UI 坐标
+            pos, rot = cam_state.position, cam_state.wxyz
+            gui_pose_info.content = f"📍 **坐标**:\n `{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}`"
+            
+            # ==========================================
+            # 🌟 夺舍术：克隆真实相机，完美保留所有 4D 属性！
+            # ==========================================
+            frame_idx = int(gui_frame.value)
+            frame_idx = min(frame_idx, len(train_cameras) - 1)
+            # 克隆对应的真实相机（这就连带把 timestamp, fid 等全偷过来了，时间轴绝对有效！）
+            view_cam = copy.copy(train_cameras[frame_idx])
+            
+            # 计算当前画质分辨率
             W = int(cam_state.aspect * 1000 * gui_res_scale.value)
             H = int(1000 * gui_res_scale.value)
+            view_cam.image_width = W
+            view_cam.image_height = H
             
-            # --- 核心数学：坐标系转换 (Viser -> 3DGS) ---
-            # Viser (Web) 的相机是: +X向右, +Y向上, +Z向后
-            # 3DGS (COLMAP) 的相机是: +X向右, +Y向下, +Z向前
+            # --- Viser 相机移动 映射回 3DGS ---
             c2w = np.eye(4)
             c2w[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
             c2w[:3, 3] = cam_state.position
             
-            # 翻转 Y 和 Z 轴
-            c2w[:3, 1:3] *= -1 
-            
+            c2w[:3, 1:3] *= -1 # Viser to COLMAP
             w2c = np.linalg.inv(c2w)
-            R = w2c[:3, :3].T  # 3DGS 要求 R 是转置的
-            T = w2c[:3, 3]
             
-            # 计算 FOV
+            # 构建标准的 Torch 矩阵
+            world_view_transform = torch.tensor(w2c, dtype=torch.float32).transpose(0, 1).cuda()
             fovy = cam_state.fov
             fovx = 2 * math.atan(math.tan(fovy / 2) * cam_state.aspect)
             
-            world_view_transform = torch.tensor(getWorld2View2(R, T, np.array([0.0, 0.0, 0.0]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
             projection_matrix = getProjectionMatrix(znear=0.01, zfar=1000.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
             full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
             
-            # 生成虚拟相机
-            view_cam = MiniCam(W, H, fovy, fovx, 0.01, 100.0, world_view_transform, full_proj_transform)
+            # 强行覆盖克隆相机的空间位置
+            view_cam.FoVy = fovy
+            view_cam.FoVx = fovx
+            view_cam.world_view_transform = world_view_transform
+            view_cam.projection_matrix = projection_matrix
+            view_cam.full_proj_transform = full_proj_transform
+            view_cam.camera_center = world_view_transform.inverse()[3, :3]
             
-            # 注入 4D 动态时间戳
-            view_cam.fid = int(gui_frame.value)
-            view_cam.time = float(gui_frame.value / max(1, max_frames))
-            view_cam.timestamp = view_cam.time
-            
-            # --- 执行前向渲染 ---
+            # 渲染画面！
             render_pkg = render(view_cam, gaussians, pipe, background)
             rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
             
-            # 转换成图片并发送给浏览器！
+            # 发送给网页
             img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-            # client.set_background_image(img_np, format="jpeg")
             client.scene.set_background_image(img_np, format="jpeg")
-        # 极短的休眠，防止死循环把 CPU 跑满
+            
         time.sleep(0.01)
 
 if __name__ == "__main__":
