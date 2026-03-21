@@ -56,10 +56,12 @@ class TrainerHybrid(TrainerSWinGS):
             self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
         # ==========================================
-        # [新增] 初始化单独的 Loss 记录列表 (仅存内存，不进 JSON)
+        # [修改] 初始化记录列表，增加点云数量监控
         # ==========================================
         self.loss_history = []
         self.loss_iterations = []
+        self.pts_4d_history = []  # 记录 4D 动态高斯点数量
+        self.pts_3d_history = []  # 记录 3D 静态高斯点数量
 
         progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="HybridGS Training")
         iter_start = torch.cuda.Event(enable_timing=True)
@@ -110,8 +112,6 @@ class TrainerHybrid(TrainerSWinGS):
                     l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
                     current_loss += l_reg_d
                 # ====================================================================
-
-                # (注: 下方的 lambda_rigid 和 lambda_motion 由于你配置中是 0.0，且涉及 KNN，我建议如果不用就保持原样或删掉即可)
 
                 if self.opt.lambda_rigid > 0:
                     k = 20
@@ -165,10 +165,6 @@ class TrainerHybrid(TrainerSWinGS):
             iter_end.record()
 
             with torch.no_grad():
-                # if iteration % 100 == 0:
-                #     num_4d = self.gaussians.get_xyz.shape[0]
-                #     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
-                #     self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
                 # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
                 if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
                      self.robust_hard_constraint_classifier()
@@ -221,11 +217,23 @@ class TrainerHybrid(TrainerSWinGS):
                     postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]"}
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
+                    
                     # ==========================================
-                    # [新增] 每 10 步记录一次 Loss，用于画图
+                    # [修改] 每 10 步记录 Loss 和 高斯点数量
                     # ==========================================
                     self.loss_iterations.append(iteration)
                     self.loss_history.append(loss)
+                    
+                    # 安全获取 4D 动态点数量
+                    num_4d = self.gaussians.get_xyz.shape[0] if self.gaussians.get_xyz is not None else 0
+                    self.pts_4d_history.append(num_4d)
+                    
+                    # 安全获取 3D 静态点数量
+                    try:
+                        num_3d = self.gaussians.get_static_xyz.shape[0] if (hasattr(self.gaussians, 'get_static_xyz') and self.gaussians.get_static_xyz is not None) else 0
+                    except:
+                        num_3d = 0
+                    self.pts_3d_history.append(num_3d)
                 
                 if iteration == self.opt.iterations:
                     self.evaluate(iteration)
@@ -240,33 +248,55 @@ class TrainerHybrid(TrainerSWinGS):
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "hybridgs_metrics.json"))
         
         # ==========================================
-        # [新增] 训练结束：绘制并保存 Loss 曲线图
+        # [修改] 训练结束：绘制并保存双 Y 轴指标图 (Loss + Points)
         # ==========================================
         try:
             import matplotlib.pyplot as plt
-            plt.figure(figsize=(12, 6))
-            plt.plot(self.loss_iterations, self.loss_history, label="Training Loss", color="#1f77b4", linewidth=1.5, alpha=0.9)
+            fig, ax1 = plt.subplots(figsize=(12, 6))
             
-            # 美化图表
-            plt.title("Training Loss Curve over Iterations", fontsize=14, fontweight='bold')
-            plt.xlabel("Iteration", fontsize=12)
-            plt.ylabel("Total Loss", fontsize=12)
-            plt.grid(True, linestyle='--', alpha=0.6)
-            plt.legend(loc="upper right", fontsize=12)
+            # --- 1. 左侧 Y 轴：绘制 Loss 曲线 ---
+            color_loss = '#1f77b4'
+            ax1.set_xlabel("Iteration", fontsize=12)
+            ax1.set_ylabel("Total Loss", color=color_loss, fontsize=12, fontweight='bold')
+            line_loss, = ax1.plot(self.loss_iterations, self.loss_history, label="Training Loss", color=color_loss, linewidth=1.5, alpha=0.9)
+            ax1.tick_params(axis='y', labelcolor=color_loss)
+            ax1.grid(True, linestyle='--', alpha=0.6)
             
-            # 设置动态 Y 轴范围（防止个别离群点把整个图压扁）
+            # 设置动态 Loss Y 轴范围（防止离群点把图压扁）
             if len(self.loss_history) > 100:
-                # 忽略最开始极不稳定的前 10% 的数据来计算 Y 轴上限
                 stable_losses = self.loss_history[len(self.loss_history)//10:]
-                plt.ylim(0, max(stable_losses) * 1.5)
+                ax1.set_ylim(0, max(stable_losses) * 1.5)
+            
+            # --- 2. 右侧 Y 轴：绘制点云数量曲线 ---
+            ax2 = ax1.twinx()  # 创建共享 X 轴的第二个 Y 轴
+            color_4d = '#ff7f0e'  # 橙色代表 4D 动态点
+            color_3d = '#2ca02c'  # 绿色代表 3D 静态点
+            
+            ax2.set_ylabel("Number of Gaussian Points", color='#333333', fontsize=12, fontweight='bold')
+            line_4d, = ax2.plot(self.loss_iterations, self.pts_4d_history, label="4D Dynamic Points", color=color_4d, linewidth=2.0, alpha=0.85)
+            
+            lines = [line_loss, line_4d]
+            
+            # 如果存在 3D 静态点，也画上去
+            if sum(self.pts_3d_history) > 0:
+                line_3d, = ax2.plot(self.loss_iterations, self.pts_3d_history, label="3D Static Points", color=color_3d, linewidth=2.0, linestyle='--', alpha=0.85)
+                lines.append(line_3d)
+                
+            ax2.tick_params(axis='y', labelcolor='#333333')
+            
+            # --- 3. 图例与保存 ---
+            labels = [l.get_label() for l in lines]
+            ax1.legend(lines, labels, loc="upper center", bbox_to_anchor=(0.5, 1.1), ncol=3, fontsize=11)
+            
+            plt.title("Training Loss and Densification over Iterations", fontsize=14, fontweight='bold', pad=30)
             
             # 保存为高清 PNG 图像
-            loss_plot_path = os.path.join(self.args.model_path, "loss_curve.png")
+            loss_plot_path = os.path.join(self.args.model_path, "loss_and_points_curve.png")
             plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
             plt.close()
-            print(f"📊 [指标可视化] 训练 Loss 曲线已完美保存至: {loss_plot_path}")
+            print(f"📊 [指标可视化] 训练 Loss 与高斯点数量联动图已保存至: {loss_plot_path}")
             
         except ImportError:
-            print("⚠️ [指标可视化] 缺少 matplotlib 库，跳过绘制 Loss 曲线。如需绘制请运行: pip install matplotlib")
+            print("⚠️ [指标可视化] 缺少 matplotlib 库，跳过绘制图表。如需绘制请运行: pip install matplotlib")
         except Exception as e:
-            print(f"⚠️ [指标可视化] 绘制 Loss 曲线时发生错误: {e}")
+            print(f"⚠️ [指标可视化] 绘制联动图表时发生错误: {e}")
