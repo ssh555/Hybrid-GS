@@ -146,12 +146,34 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
     scene = Scene(dataset, gaussians, shuffle=False)
     train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
-    max_frames = len(train_cams) - 1
+    # 我们以第 1 个相机的空间位置为基准 (View 0)
+    base_cam = train_cams[0]
+    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
+    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R # [新增] 获取基准相机的旋转矩阵
+    
+    max_frames = 0
+    
+    for cam in train_cams:
+        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
+        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R # [新增] 获取当前相机的旋转矩阵
+        
+        # [核心修复] 必须位置(T)和旋转角度(R)都极其接近（误差小于1e-5），才被认定是绝对的同一个静态视角
+        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
+            max_frames += 1
+        else:
+            break
+    # 以max_frames作为时间维度的长度，拆分train_cams成多个视角的时间序列
+    # 不同视角的连续帧会被分到不同的列表中，确保每个列表中的相机都是同一个视角的连续时间帧
+    view_cams = []
+    for i in range(0, len(train_cams), max_frames):
+        view_cams.append(train_cams[i:i+max_frames])
+    max_cams = len(view_cams)
+    print(f"[渲染器] 数据集共有 {len(train_cams)} 图像，分为 {len(view_cams)} 个视角，每个视角最多 {max_cams} 帧")
 
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    TARGET_W, TARGET_H = 1280, 720
+    TARGET_W, TARGET_H = train_cams[0].resolution[0], train_cams[0].resolution[1]
 
     server = viser.ViserServer(port=8080)
 
@@ -189,8 +211,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
         frame_idx = int(slider_frame.value)
 
-        base_cam = train_cams[frame_idx]   # 时间
-        selected_cam = train_cams[int(cam_id.value)]  # 视角
+        selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
 
         for client in server.get_clients().values():
 
@@ -235,7 +256,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
                 center = wvt.inverse()[3,:3]
 
-                view_cam = ProxyCam(base_cam)
+                view_cam = ProxyCam(selected_cam)
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
                 view_cam.override_full = full
