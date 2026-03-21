@@ -32,6 +32,7 @@ class MiniCam:
         # 4D 专属时间属性
         self.fid = 0
         self.time = 0.0
+        self.timestamp = 0.0
 
 @torch.no_grad()
 def main(dataset: ModelParams, pipe: PipelineParams, args):
@@ -109,6 +110,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             # 注入 4D 动态时间戳
             view_cam.fid = int(gui_frame.value)
             view_cam.time = float(gui_frame.value / max(1, max_frames))
+            view_cam.timestamp = view_cam.time
             
             # --- 执行前向渲染 ---
             render_pkg = render(view_cam, gaussians, pipe, background)
