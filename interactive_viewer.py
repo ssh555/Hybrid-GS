@@ -42,8 +42,7 @@ def apply_pan_and_zoom(cam, zoom_factor, pan_x, pan_y):
     
     # 在世界空间中计算偏移量 (这里可以调节灵敏度，0.5 是基准)
     shift_world = (pan_x * local_right * 0.5) + (pan_y * local_up * 0.5)
-    cam.camera_center = cam.camera_center + torch.tensor(shift_world, dtype=torch.float32).cuda()
-    
+    cam.camera_center = cam.camera_center + torch.tensor(shift_world, dtype=torch.float32, device=cam.camera_center.device)
     # 更新平移矩阵
     T_new = T - (R @ shift_world)
     W2C[:3, 3] = T_new
