@@ -16,12 +16,11 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 
 # ==============================
-# Quaternion SLERP（修复报错）
+# SLERP
 # ==============================
 def slerp(q1, q2, t):
     q1 = q1 / np.linalg.norm(q1)
     q2 = q2 / np.linalg.norm(q2)
-
     dot = np.dot(q1, q2)
 
     if dot < 0:
@@ -42,7 +41,7 @@ def slerp(q1, q2, t):
 
 
 # ==============================
-# Proxy Camera
+# ProxyCam（修复版）
 # ==============================
 class ProxyCam:
     def __init__(self, base_cam):
@@ -60,21 +59,36 @@ class ProxyCam:
         return getattr(self.base, name)
 
     @property
-    def world_view_transform(self): return self.override_wvt or self.base.world_view_transform
+    def world_view_transform(self):
+        return self.override_wvt if self.override_wvt is not None else self.base.world_view_transform
+
     @property
-    def projection_matrix(self): return self.override_proj or self.base.projection_matrix
+    def projection_matrix(self):
+        return self.override_proj if self.override_proj is not None else self.base.projection_matrix
+
     @property
-    def full_proj_transform(self): return self.override_full or self.base.full_proj_transform
+    def full_proj_transform(self):
+        return self.override_full if self.override_full is not None else self.base.full_proj_transform
+
     @property
-    def camera_center(self): return self.override_center or self.base.camera_center
+    def camera_center(self):
+        return self.override_center if self.override_center is not None else self.base.camera_center
+
     @property
-    def image_width(self): return self.override_w or self.base.image_width
+    def image_width(self):
+        return self.override_w if self.override_w is not None else self.base.image_width
+
     @property
-    def image_height(self): return self.override_h or self.base.image_height
+    def image_height(self):
+        return self.override_h if self.override_h is not None else self.base.image_height
+
     @property
-    def FoVx(self): return self.override_fovx or self.base.FoVx
+    def FoVx(self):
+        return self.override_fovx if self.override_fovx is not None else self.base.FoVx
+
     @property
-    def FoVy(self): return self.override_fovy or self.base.FoVy
+    def FoVy(self):
+        return self.override_fovy if self.override_fovy is not None else self.base.FoVy
 
 
 # ==============================
@@ -87,8 +101,27 @@ def get_c2w(cam):
     return c2w
 
 
-def lerp(a, b, t):
-    return a * (1 - t) + b * t
+def letterbox(img, target_h, target_w):
+    h, w = img.shape[:2]
+    scale = min(target_w / w, target_h / h)
+
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    resized = np.array(
+        torch.nn.functional.interpolate(
+            torch.from_numpy(img).permute(2,0,1).unsqueeze(0).float(),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False
+        )[0].permute(1,2,0)
+    ).astype(np.uint8)
+
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    y0 = (target_h - new_h)//2
+    x0 = (target_w - new_w)//2
+    canvas[y0:y0+new_h, x0:x0+new_w] = resized
+    return canvas
 
 
 # ==============================
@@ -97,8 +130,11 @@ def lerp(a, b, t):
 @torch.no_grad()
 def main(dataset: ModelParams, pipe: PipelineParams, args):
 
-    bg_color = [1,1,1] if dataset.white_background else [0.2,0.2,0.2]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    background = torch.tensor(
+        [1,1,1] if dataset.white_background else [0.2,0.2,0.2],
+        dtype=torch.float32,
+        device="cuda"
+    )
 
     gaussians = GaussianModel(
         dataset.sh_degree,
@@ -115,132 +151,69 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    # ===== 场景范围 =====
-    centers = np.array([get_c2w(cam)[:3,3] for cam in train_cams])
-    scene_center = centers.mean(axis=0)
-    scene_radius = np.linalg.norm(centers - scene_center, axis=1).max()
+    TARGET_W, TARGET_H = 1280, 720
 
-    # ===== 可视化 =====
     server = viser.ViserServer(port=8080)
 
     play_state = {"playing": False, "direction": 1}
 
-    with server.gui.add_folder("🎬 播放器"):
+    with server.gui.add_folder("🎬 控制台"):
+
+        cam_id = server.gui.add_slider("相机选择", 0, len(train_cams)-1, 1, 0)
 
         mode = server.gui.add_dropdown(
             "模式",
-            ("原始轨迹", "插值播放", "自由漫游"),
-            initial_value="原始轨迹"
+            ("训练相机", "自由漫游"),
+            initial_value="训练相机"
         )
 
-        btn_play = server.gui.add_button("▶️ 播放")
-        btn_pause = server.gui.add_button("⏸ 暂停")
+        btn_play = server.gui.add_button("▶️")
+        btn_pause = server.gui.add_button("⏸")
 
-        btn_prev = server.gui.add_button("⏮ 上一帧")
-        btn_next = server.gui.add_button("⏭ 下一帧")
-
-        btn_backward = server.gui.add_button("⏪ 倒放")
-        btn_forward = server.gui.add_button("⏩ 快进")
-
-        slider_frame = server.gui.add_slider("进度", 0, max_frames, 0.01, 0)
+        slider_frame = server.gui.add_slider("时间", 0, max_frames, 0.01, 0)
         slider_speed = server.gui.add_slider("速度", 0.25, 2.0, 0.05, 1.0)
-        res_scale = server.gui.add_slider("分辨率倍率", 0.5, 2.0, 0.1, 1.0)
 
-        loop_toggle = server.gui.add_checkbox("循环播放", True)
-        txt = server.gui.add_text("帧信息", "0")
-
-    # ===== 按钮 =====
     @btn_play.on_click
-    def _(_): play_state.update({"playing": True, "direction": 1})
+    def _(_): play_state["playing"] = True
 
     @btn_pause.on_click
     def _(_): play_state["playing"] = False
 
-    @btn_forward.on_click
-    def _(_): play_state.update({"playing": True, "direction": 1})
-
-    @btn_backward.on_click
-    def _(_): play_state.update({"playing": True, "direction": -1})
-
-    @btn_next.on_click
-    def _(_): slider_frame.value = min(slider_frame.value + 1, max_frames)
-
-    @btn_prev.on_click
-    def _(_): slider_frame.value = max(slider_frame.value - 1, 0)
-
-    # ===== 主循环 =====
     while True:
 
         if play_state["playing"]:
-            slider_frame.value += play_state["direction"] * slider_speed.value
+            slider_frame.value += slider_speed.value
 
         if slider_frame.value > max_frames:
-            slider_frame.value = 0 if loop_toggle.value else max_frames
+            slider_frame.value = 0
 
-        if slider_frame.value < 0:
-            slider_frame.value = max_frames if loop_toggle.value else 0
+        frame_idx = int(slider_frame.value)
 
-        txt.value = f"{int(slider_frame.value)} / {max_frames}"
-
-        f_idx = int(slider_frame.value)
-        t = slider_frame.value - f_idx
-
-        cam_a = train_cams[f_idx]
-        cam_b = train_cams[(f_idx+1)%len(train_cams)]
+        base_cam = train_cams[frame_idx]   # 时间
+        selected_cam = train_cams[int(cam_id.value)]  # 视角
 
         for client in server.get_clients().values():
 
-            # ===== 模式1 =====
-            if mode.value == "原始轨迹":
-                view_cam = cam_a
-                c2w = get_c2w(cam_a)
+            # ===== 模式1：训练相机 =====
+            if mode.value == "训练相机":
+
+                view_cam = selected_cam
+
+                c2w = get_c2w(selected_cam)
                 client.camera.position = c2w[:3,3]
                 client.camera.wxyz = tf.SO3.from_matrix(c2w[:3,:3]).wxyz
 
-            # ===== 模式2 =====
-            elif mode.value == "插值播放":
-
-                c2w_a = get_c2w(cam_a)
-                c2w_b = get_c2w(cam_b)
-
-                pos = lerp(c2w_a[:3,3], c2w_b[:3,3], t)
-
-                q1 = tf.SO3.from_matrix(c2w_a[:3,:3]).wxyz
-                q2 = tf.SO3.from_matrix(c2w_b[:3,:3]).wxyz
-                q_interp = slerp(q1, q2, t)
-
-                client.camera.position = pos
-                client.camera.wxyz = q_interp
-
-                view_cam = cam_a
-
-            # ===== 模式3 =====
+            # ===== 模式2：自由漫游 =====
             else:
                 cam_state = client.camera
 
-                pos = cam_state.position
-                offset = pos - scene_center
-                dist = np.linalg.norm(offset)
-
-                max_r = scene_radius * 1.2
-                min_r = scene_radius * 0.3
-
-                if dist > max_r:
-                    pos = scene_center + offset/dist * max_r
-                if dist < min_r:
-                    pos = scene_center + offset/dist * min_r
-
+                aspect = TARGET_W / TARGET_H
                 fovy = np.clip(cam_state.fov, np.deg2rad(40), np.deg2rad(70))
-                aspect = cam_state.aspect
                 fovx = 2 * math.atan(math.tan(fovy/2)*aspect)
-
-                BASE_H = int(1080 * res_scale.value)
-                H = BASE_H
-                W = int(H * aspect)
 
                 c2w = np.eye(4)
                 c2w[:3,:3] = tf.SO3(cam_state.wxyz).as_matrix()
-                c2w[:3,3] = pos
+                c2w[:3,3] = cam_state.position
                 c2w[:,1:3] *= -1
 
                 w2c = np.linalg.inv(c2w)
@@ -262,20 +235,20 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
                 center = wvt.inverse()[3,:3]
 
-                view_cam = ProxyCam(cam_a)
+                view_cam = ProxyCam(base_cam)
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
                 view_cam.override_full = full
                 view_cam.override_center = center
-                view_cam.override_w = W
-                view_cam.override_h = H
-                view_cam.override_fovx = fovx
-                view_cam.override_fovy = fovy
+                view_cam.override_w = TARGET_W
+                view_cam.override_h = TARGET_H
 
-            # ===== 渲染（PNG高清！）=====
+            # ===== 渲染 =====
             out = render(view_cam, gaussians, pipe, background)
             img = torch.clamp(out["render"], 0,1)
             img = (img.cpu().numpy().transpose(1,2,0)*255).astype(np.uint8)
+
+            img = letterbox(img, TARGET_H, TARGET_W)
 
             client.scene.set_background_image(img, format="png")
 
