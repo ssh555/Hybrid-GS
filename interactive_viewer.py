@@ -1,4 +1,3 @@
-import os
 import time
 import math
 import torch
@@ -14,6 +13,32 @@ from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
+
+
+# ==============================
+# Quaternion SLERP（修复报错）
+# ==============================
+def slerp(q1, q2, t):
+    q1 = q1 / np.linalg.norm(q1)
+    q2 = q2 / np.linalg.norm(q2)
+
+    dot = np.dot(q1, q2)
+
+    if dot < 0:
+        q2 = -q2
+        dot = -dot
+
+    if dot > 0.9995:
+        result = q1 + t * (q2 - q1)
+        return result / np.linalg.norm(result)
+
+    theta_0 = np.arccos(dot)
+    theta = theta_0 * t
+
+    q3 = q2 - q1 * dot
+    q3 /= np.linalg.norm(q3)
+
+    return q1 * np.cos(theta) + q3 * np.sin(theta)
 
 
 # ==============================
@@ -67,7 +92,7 @@ def lerp(a, b, t):
 
 
 # ==============================
-# Main
+# 主函数
 # ==============================
 @torch.no_grad()
 def main(dataset: ModelParams, pipe: PipelineParams, args):
@@ -90,12 +115,12 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    # ===== 安全区域 =====
+    # ===== 场景范围 =====
     centers = np.array([get_c2w(cam)[:3,3] for cam in train_cams])
     scene_center = centers.mean(axis=0)
     scene_radius = np.linalg.norm(centers - scene_center, axis=1).max()
 
-    # ===== UI =====
+    # ===== 可视化 =====
     server = viser.ViserServer(port=8080)
 
     play_state = {"playing": False, "direction": 1}
@@ -119,58 +144,41 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
         slider_frame = server.gui.add_slider("进度", 0, max_frames, 0.01, 0)
         slider_speed = server.gui.add_slider("速度", 0.25, 2.0, 0.05, 1.0)
+        res_scale = server.gui.add_slider("分辨率倍率", 0.5, 2.0, 0.1, 1.0)
 
         loop_toggle = server.gui.add_checkbox("循环播放", True)
         txt = server.gui.add_text("帧信息", "0")
 
-    # ===== 事件绑定 =====
+    # ===== 按钮 =====
     @btn_play.on_click
-    def _(_):
-        play_state["playing"] = True
-        play_state["direction"] = 1
+    def _(_): play_state.update({"playing": True, "direction": 1})
 
     @btn_pause.on_click
-    def _(_):
-        play_state["playing"] = False
+    def _(_): play_state["playing"] = False
 
     @btn_forward.on_click
-    def _(_):
-        play_state["playing"] = True
-        play_state["direction"] = 1
+    def _(_): play_state.update({"playing": True, "direction": 1})
 
     @btn_backward.on_click
-    def _(_):
-        play_state["playing"] = True
-        play_state["direction"] = -1
+    def _(_): play_state.update({"playing": True, "direction": -1})
 
     @btn_next.on_click
-    def _(_):
-        slider_frame.value = min(slider_frame.value + 1, max_frames)
+    def _(_): slider_frame.value = min(slider_frame.value + 1, max_frames)
 
     @btn_prev.on_click
-    def _(_):
-        slider_frame.value = max(slider_frame.value - 1, 0)
+    def _(_): slider_frame.value = max(slider_frame.value - 1, 0)
 
     # ===== 主循环 =====
     while True:
 
-        # ===== 播放逻辑 =====
         if play_state["playing"]:
             slider_frame.value += play_state["direction"] * slider_speed.value
 
         if slider_frame.value > max_frames:
-            if loop_toggle.value:
-                slider_frame.value = 0
-            else:
-                slider_frame.value = max_frames
-                play_state["playing"] = False
+            slider_frame.value = 0 if loop_toggle.value else max_frames
 
         if slider_frame.value < 0:
-            if loop_toggle.value:
-                slider_frame.value = max_frames
-            else:
-                slider_frame.value = 0
-                play_state["playing"] = False
+            slider_frame.value = max_frames if loop_toggle.value else 0
 
         txt.value = f"{int(slider_frame.value)} / {max_frames}"
 
@@ -178,18 +186,18 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         t = slider_frame.value - f_idx
 
         cam_a = train_cams[f_idx]
-        cam_b = train_cams[(f_idx+1) % len(train_cams)]
+        cam_b = train_cams[(f_idx+1)%len(train_cams)]
 
         for client in server.get_clients().values():
 
-            # ========= 模式1 =========
+            # ===== 模式1 =====
             if mode.value == "原始轨迹":
                 view_cam = cam_a
                 c2w = get_c2w(cam_a)
                 client.camera.position = c2w[:3,3]
                 client.camera.wxyz = tf.SO3.from_matrix(c2w[:3,:3]).wxyz
 
-            # ========= 模式2 =========
+            # ===== 模式2 =====
             elif mode.value == "插值播放":
 
                 c2w_a = get_c2w(cam_a)
@@ -197,15 +205,16 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
                 pos = lerp(c2w_a[:3,3], c2w_b[:3,3], t)
 
-                R = tf.SO3.from_matrix(c2w_a[:3,:3]).slerp(
-                    tf.SO3.from_matrix(c2w_b[:3,:3]), t)
+                q1 = tf.SO3.from_matrix(c2w_a[:3,:3]).wxyz
+                q2 = tf.SO3.from_matrix(c2w_b[:3,:3]).wxyz
+                q_interp = slerp(q1, q2, t)
 
                 client.camera.position = pos
-                client.camera.wxyz = R.wxyz
+                client.camera.wxyz = q_interp
 
                 view_cam = cam_a
 
-            # ========= 模式3 =========
+            # ===== 模式3 =====
             else:
                 cam_state = client.camera
 
@@ -221,9 +230,13 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 if dist < min_r:
                     pos = scene_center + offset/dist * min_r
 
-                fovy = np.clip(cam_state.fov, np.deg2rad(30), np.deg2rad(75))
+                fovy = np.clip(cam_state.fov, np.deg2rad(40), np.deg2rad(70))
                 aspect = cam_state.aspect
                 fovx = 2 * math.atan(math.tan(fovy/2)*aspect)
+
+                BASE_H = int(1080 * res_scale.value)
+                H = BASE_H
+                W = int(H * aspect)
 
                 c2w = np.eye(4)
                 c2w[:3,:3] = tf.SO3(cam_state.wxyz).as_matrix()
@@ -254,23 +267,23 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam.override_proj = proj
                 view_cam.override_full = full
                 view_cam.override_center = center
-                view_cam.override_w = int(800*aspect)
-                view_cam.override_h = 800
+                view_cam.override_w = W
+                view_cam.override_h = H
                 view_cam.override_fovx = fovx
                 view_cam.override_fovy = fovy
 
-            # ===== 渲染 =====
+            # ===== 渲染（PNG高清！）=====
             out = render(view_cam, gaussians, pipe, background)
             img = torch.clamp(out["render"], 0,1)
             img = (img.cpu().numpy().transpose(1,2,0)*255).astype(np.uint8)
 
-            client.scene.set_background_image(img, format="jpeg")
+            client.scene.set_background_image(img, format="png")
 
         time.sleep(0.02)
 
 
 # ==============================
-# Entry
+# 启动
 # ==============================
 if __name__ == "__main__":
     parser = ArgumentParser()
