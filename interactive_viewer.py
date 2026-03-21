@@ -181,7 +181,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
     with server.gui.add_folder("🎬 控制台"):
 
-        cam_id = server.gui.add_slider("相机选择", 0, len(train_cams)-1, 1, 0)
+        cam_id = server.gui.add_slider("相机选择", 0, max_cams-1, 1, 0)
 
         mode = server.gui.add_dropdown(
             "模式",
@@ -192,7 +192,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         btn_play = server.gui.add_button("▶️")
         btn_pause = server.gui.add_button("⏸")
 
-        slider_frame = server.gui.add_slider("时间", 0, max_frames, 0.01, 0)
+        slider_frame = server.gui.add_slider("时间", 0, max_frames-1, 0.01, 0)
         slider_speed = server.gui.add_slider("速度", 0.25, 2.0, 0.05, 1.0)
 
     @btn_play.on_click
