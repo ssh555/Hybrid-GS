@@ -234,7 +234,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             canvas[y0:y0+render_h, x0:x0+render_w] = img_np
 
             # 发送给前端 (使用 jpeg 压缩速度更快，提升帧率)
-            client.scene.set_background_image(canvas, format="jpeg")
+            client.scene.set_background_image(canvas, format="png")
 
         time.sleep(0.02)
 
