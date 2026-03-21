@@ -118,8 +118,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             
             # 转换成图片并发送给浏览器！
             img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-            client.set_background_image(img_np, format="jpeg")
-            
+            # client.set_background_image(img_np, format="jpeg")
+            client.scene.set_background_image(img_np, format="jpeg")
         # 极短的休眠，防止死循环把 CPU 跑满
         time.sleep(0.01)
 
