@@ -101,29 +101,6 @@ def get_c2w(cam):
     return c2w
 
 
-def letterbox(img, target_h, target_w):
-    h, w = img.shape[:2]
-    scale = min(target_w / w, target_h / h)
-
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    resized = np.array(
-        torch.nn.functional.interpolate(
-            torch.from_numpy(img).permute(2,0,1).unsqueeze(0).float(),
-            size=(new_h, new_w),
-            mode="bilinear",
-            align_corners=False
-        )[0].permute(1,2,0)
-    ).astype(np.uint8)
-
-    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-    y0 = (target_h - new_h)//2
-    x0 = (target_w - new_w)//2
-    canvas[y0:y0+new_h, x0:x0+new_w] = resized
-    return canvas
-
-
 # ==============================
 # 主函数
 # ==============================
@@ -146,24 +123,25 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
     scene = Scene(dataset, gaussians, shuffle=False)
     train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
+    
     # 我们以第 1 个相机的空间位置为基准 (View 0)
     base_cam = train_cams[0]
     base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
-    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R # [新增] 获取基准相机的旋转矩阵
+    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R
     
     max_frames = 0
     
     for cam in train_cams:
         cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R # [新增] 获取当前相机的旋转矩阵
+        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R
         
-        # [核心修复] 必须位置(T)和旋转角度(R)都极其接近（误差小于1e-5），才被认定是绝对的同一个静态视角
+        # 必须位置(T)和旋转角度(R)都极其接近（误差小于1e-5），才被认定是绝对的同一个静态视角
         if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
             max_frames += 1
         else:
             break
+            
     # 以max_frames作为时间维度的长度，拆分train_cams成多个视角的时间序列
-    # 不同视角的连续帧会被分到不同的列表中，确保每个列表中的相机都是同一个视角的连续时间帧
     view_cams = []
     for i in range(0, len(train_cams), max_frames):
         view_cams.append(train_cams[i:i+max_frames])
@@ -173,21 +151,24 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    TARGET_W, TARGET_H = train_cams[0].resolution[0], train_cams[0].resolution[1]
-
     server = viser.ViserServer(port=8080)
-
     play_state = {"playing": False, "direction": 1}
 
+    # ==========================================
+    # 🎬 强大的 UI 控制台
+    # ==========================================
     with server.gui.add_folder("🎬 控制台"):
+        cam_id = server.gui.add_slider("🎥 相机机位切换", 0, max_cams-1, 1, 0)
 
-        cam_id = server.gui.add_slider("相机选择", 0, max_cams-1, 1, 0)
+        with server.gui.add_folder("播放控制", expand_by_default=True):
+            btn_play = server.gui.add_button("▶️ 播放")
+            btn_pause = server.gui.add_button("⏸ 暂停")
 
-        btn_play = server.gui.add_button("▶️")
-        btn_pause = server.gui.add_button("⏸")
-
-        slider_frame = server.gui.add_slider("时间", 0, max_frames-1, 0.01, 0)
-        slider_speed = server.gui.add_slider("速度", 0.25, 2.0, 0.05, 1.0)
+        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
+        slider_speed = server.gui.add_slider("⚡ 播放速度", 0.25, 2.0, 0.05, 1.0)
+        
+        # [新增] 原生级画质控制器
+        gui_res_scale = server.gui.add_slider("🖥️ 原生渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
 
     @btn_play.on_click
     def _(_): play_state["playing"] = True
@@ -196,7 +177,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     def _(_): play_state["playing"] = False
 
     while True:
-
         if play_state["playing"]:
             slider_frame.value += slider_speed.value
 
@@ -204,25 +184,57 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             slider_frame.value = 0
 
         frame_idx = int(slider_frame.value)
-
         selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
 
         for client in server.get_clients().values():
-            view_cam = selected_cam
-
+            
+            # 1. 设置视角的空间位置（让前端的视角跟着变）
             c2w = get_c2w(selected_cam)
             client.camera.position = c2w[:3,3]
             client.camera.wxyz = tf.SO3.from_matrix(c2w[:3,:3]).wxyz
 
+            # 2. 获取原始分辨率，并应用画质倍率
+            scale = gui_res_scale.value
+            native_w = selected_cam.image_width
+            native_h = selected_cam.image_height
+            render_w = int(native_w * scale)
+            render_h = int(native_h * scale)
 
-            # ===== 渲染 =====
+            # 3. 使用代理相机，覆盖底层的分辨率（直接输出高清画面！）
+            view_cam = ProxyCam(selected_cam)
+            view_cam.override_w = render_w
+            view_cam.override_h = render_h
+
+            # ===== 底层高清渲染 =====
             out = render(view_cam, gaussians, pipe, background)
-            img = torch.clamp(out["render"], 0,1)
-            img = (img.cpu().numpy().transpose(1,2,0)*255).astype(np.uint8)
+            img = torch.clamp(out["render"], 0, 1)
+            img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-            img = letterbox(img, TARGET_H, TARGET_W)
+            # ==========================================
+            # 🌟 智能自适应黑边填充逻辑 (绝对不再变形！)
+            # ==========================================
+            browser_aspect = client.camera.aspect
+            render_aspect = render_w / render_h
 
-            client.scene.set_background_image(img, format="png")
+            if browser_aspect > render_aspect:
+                # 浏览器比渲染图更“宽” -> 左右留黑边
+                canvas_h = render_h
+                canvas_w = int(render_h * browser_aspect)
+            else:
+                # 浏览器比渲染图更“高” -> 上下留黑边
+                canvas_w = render_w
+                canvas_h = int(render_w / browser_aspect)
+
+            # 创建一张纯黑幕布
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+            # 计算居中坐标，把极其清晰的原生渲染图“贴”在正中间
+            y0 = (canvas_h - render_h) // 2
+            x0 = (canvas_w - render_w) // 2
+            canvas[y0:y0+render_h, x0:x0+render_w] = img_np
+
+            # 发送给前端 (使用 jpeg 压缩速度更快，提升帧率)
+            client.scene.set_background_image(canvas, format="jpeg")
 
         time.sleep(0.02)
 
