@@ -183,12 +183,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
         cam_id = server.gui.add_slider("相机选择", 0, max_cams-1, 1, 0)
 
-        mode = server.gui.add_dropdown(
-            "模式",
-            ("训练相机", "自由漫游"),
-            initial_value="训练相机"
-        )
-
         btn_play = server.gui.add_button("▶️")
         btn_pause = server.gui.add_button("⏸")
 
@@ -214,55 +208,12 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
 
         for client in server.get_clients().values():
+            view_cam = selected_cam
 
-            # ===== 模式1：训练相机 =====
-            if mode.value == "训练相机":
+            c2w = get_c2w(selected_cam)
+            client.camera.position = c2w[:3,3]
+            client.camera.wxyz = tf.SO3.from_matrix(c2w[:3,:3]).wxyz
 
-                view_cam = selected_cam
-
-                c2w = get_c2w(selected_cam)
-                client.camera.position = c2w[:3,3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w[:3,:3]).wxyz
-
-            # ===== 模式2：自由漫游 =====
-            else:
-                cam_state = client.camera
-
-                aspect = TARGET_W / TARGET_H
-                fovy = np.clip(cam_state.fov, np.deg2rad(40), np.deg2rad(70))
-                fovx = 2 * math.atan(math.tan(fovy/2)*aspect)
-
-                c2w = np.eye(4)
-                c2w[:3,:3] = tf.SO3(cam_state.wxyz).as_matrix()
-                c2w[:3,3] = cam_state.position
-                c2w[:,1:3] *= -1
-
-                w2c = np.linalg.inv(c2w)
-                R = w2c[:3,:3].T
-                T = w2c[:3,3]
-
-                wvt = torch.tensor(
-                    getWorld2View2(R, T, np.array([0,0,0]), 1.0),
-                    dtype=torch.float32
-                ).transpose(0,1).cuda()
-
-                proj = getProjectionMatrix(
-                    znear=0.1,
-                    zfar=50.0,
-                    fovX=fovx,
-                    fovY=fovy
-                ).transpose(0,1).cuda()
-
-                full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
-                center = wvt.inverse()[3,:3]
-
-                view_cam = ProxyCam(selected_cam)
-                view_cam.override_wvt = wvt
-                view_cam.override_proj = proj
-                view_cam.override_full = full
-                view_cam.override_center = center
-                view_cam.override_w = TARGET_W
-                view_cam.override_h = TARGET_H
 
             # ===== 渲染 =====
             out = render(view_cam, gaussians, pipe, background)
