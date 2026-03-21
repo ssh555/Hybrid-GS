@@ -112,6 +112,12 @@ class TrainerSWinGS(Trainer4DGS):
             self.gaussians._expire_frame = torch.full((num_pts,), self.window_end, dtype=torch.int32, device="cuda")
             self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
+        # ==========================================
+        # [新增] 初始化单独的 Loss 记录列表 (仅存内存，不进 JSON)
+        # ==========================================
+        self.loss_history = []
+        self.loss_iterations = []
+
         progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="SWinGS Training")
         iter_start = torch.cuda.Event(enable_timing=True)
         iter_end = torch.cuda.Event(enable_timing=True)
@@ -261,6 +267,11 @@ class TrainerSWinGS(Trainer4DGS):
                     postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]", "Pts(4D)": self.gaussians.get_xyz.shape[0]}
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
+                    # ==========================================
+                    # [新增] 每 10 步记录一次 Loss，用于画图
+                    # ==========================================
+                    self.loss_iterations.append(iteration)
+                    self.loss_history.append(loss)
 
                 if iteration == self.opt.iterations:
                     self.evaluate(iteration)
@@ -270,6 +281,40 @@ class TrainerSWinGS(Trainer4DGS):
                     num_4d = self.gaussians.get_xyz.shape[0]
                     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
                     self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
+
+
                     
         progress_bar.close()
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
+
+        # ==========================================
+        # [新增] 训练结束：绘制并保存 Loss 曲线图
+        # ==========================================
+        try:
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(12, 6))
+            plt.plot(self.loss_iterations, self.loss_history, label="Training Loss", color="#1f77b4", linewidth=1.5, alpha=0.9)
+            
+            # 美化图表
+            plt.title("Training Loss Curve over Iterations", fontsize=14, fontweight='bold')
+            plt.xlabel("Iteration", fontsize=12)
+            plt.ylabel("Total Loss", fontsize=12)
+            plt.grid(True, linestyle='--', alpha=0.6)
+            plt.legend(loc="upper right", fontsize=12)
+            
+            # 设置动态 Y 轴范围（防止个别离群点把整个图压扁）
+            if len(self.loss_history) > 100:
+                # 忽略最开始极不稳定的前 10% 的数据来计算 Y 轴上限
+                stable_losses = self.loss_history[len(self.loss_history)//10:]
+                plt.ylim(0, max(stable_losses) * 1.5)
+            
+            # 保存为高清 PNG 图像
+            loss_plot_path = os.path.join(self.args.model_path, "loss_curve.png")
+            plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"📊 [指标可视化] 训练 Loss 曲线已完美保存至: {loss_plot_path}")
+            
+        except ImportError:
+            print("⚠️ [指标可视化] 缺少 matplotlib 库，跳过绘制 Loss 曲线。如需绘制请运行: pip install matplotlib")
+        except Exception as e:
+            print(f"⚠️ [指标可视化] 绘制 Loss 曲线时发生错误: {e}")
