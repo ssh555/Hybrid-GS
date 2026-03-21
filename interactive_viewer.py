@@ -1,7 +1,6 @@
 import os
 import time
 import math
-import copy
 import torch
 import numpy as np
 import viser
@@ -15,171 +14,154 @@ from scene import Scene, GaussianModel
 from gaussian_renderer import render
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
-# 全局播放状态
-class PlayState:
-    is_playing = False
+# ==========================================
+# 🌟 代理相机 (保证不丢失任何原版 4D 属性)
+# ==========================================
+class ProxyCam:
+    def __init__(self, base_cam):
+        self.base = base_cam
+        self.override_wvt = None
+        self.override_proj = None
+        self.override_full = None
+        self.override_center = None
+        self.override_w = None
+        self.override_h = None
+        self.override_fovx = None
+        self.override_fovy = None
 
-play_state = PlayState()
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    @property
+    def world_view_transform(self): return self.override_wvt if self.override_wvt is not None else self.base.world_view_transform
+    @property
+    def projection_matrix(self): return self.override_proj if self.override_proj is not None else self.base.projection_matrix
+    @property
+    def full_proj_transform(self): return self.override_full if self.override_full is not None else self.base.full_proj_transform
+    @property
+    def camera_center(self): return self.override_center if self.override_center is not None else self.base.camera_center
+    @property
+    def image_width(self): return self.override_w if self.override_w is not None else self.base.image_width
+    @property
+    def image_height(self): return self.override_h if self.override_h is not None else self.base.image_height
+    @property
+    def FoVx(self): return self.override_fovx if self.override_fovx is not None else self.base.FoVx
+    @property
+    def FoVy(self): return self.override_fovy if self.override_fovy is not None else self.base.FoVy
+
+def get_c2w_from_colmap(cam):
+    w2c = cam.world_view_transform.transpose(0, 1).cpu().numpy()
+    c2w_opencv = np.linalg.inv(w2c)
+    c2w_opengl = c2w_opencv.copy()
+    c2w_opengl[:, 1:3] *= -1
+    return c2w_opengl
 
 @torch.no_grad()
 def main(dataset: ModelParams, pipe: PipelineParams, args):
-    print(f"[引擎] 正在初始化 4DGS 终极自适应漫游引擎...")
-    
-    # 1. 初始化模型 (深灰色背景)
+    print(f"[引擎] 正在初始化 4DGS 离线级播放引擎...")
     bg_color = [1, 1, 1] if dataset.white_background else [0.2, 0.2, 0.2]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    
+
     sh_degree = dataset.sh_degree if hasattr(dataset, 'sh_degree') else 3
-    gaussians = GaussianModel(sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration, 
+    gaussians = GaussianModel(sh_degree, gaussian_dim=args.gaussian_dim, time_duration=args.time_duration,
                               rot_4d=args.rot_4d, force_sh_3d=args.force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
-    
-    # 2. 读取原始完美相机
+
+    # 读取绝对完美的原版相机
     scene = Scene(dataset, gaussians, shuffle=False)
     train_cameras = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
     max_frames = len(train_cameras) - 1
-    
+
     checkpoint = args.start_checkpoint
-    print(f"[引擎] 正在加载模型权重: {checkpoint}")
     (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
-    
+
     server = viser.ViserServer(port=8080)
     print("\n" + "="*50)
-    print(f"🚀 毕设专属 4D 引擎启动成功！请打开: http://localhost:8080")
+    print(f"🚀 毕设专属双模播放器启动成功！请打开: http://localhost:8080")
     print("="*50 + "\n")
-    
+
     # ==========================================
-    # 🌟 核心修复 1：精准提取 COLMAP 真实环境的上方向
+    # 🎬 UI 控制台
     # ==========================================
-    c0 = train_cameras[0]
-    w2c_colmap = c0.world_view_transform.transpose(0, 1).cpu().numpy()
-    c2w_colmap = np.linalg.inv(w2c_colmap)
-    c2w_opengl = c2w_colmap.copy()
-    c2w_opengl[:, 1:3] *= -1 # 转换到 Viser 坐标系
-    
-    init_pos = c2w_opengl[:3, 3]
-    init_wxyz = tf.SO3.from_matrix(c2w_opengl[:3, :3]).wxyz
-    # 动态获取相机本地的 Y 轴作为 Up Vector，彻底杜绝翻转和倒立！！！
-    real_up_direction = c2w_opengl[:3, 1]
+    with server.gui.add_folder("🎬 播放控制台"):
+        gui_mode = server.gui.add_dropdown(
+            "漫游模式", 
+            ("原画轨迹播放 (100%安全高清)", "自由漫游 (警告:靠太近会炸刺)"), 
+            initial_value="原画轨迹播放 (100%安全高清)"
+        )
+        gui_play = server.gui.add_checkbox("▶️ 自动播放/暂停", initial_value=False)
+        gui_frame = server.gui.add_slider("时间与机位进度", min=0, max=max_frames, step=1, initial_value=0)
+        
+    server.gui.add_markdown("ℹ️ **答辩建议**：使用【原画轨迹】展示完美画质；如需漫游，请切换模式，若出现乱码刺，请疯狂往后滚鼠标拉远距离！")
 
     @server.on_client_connect
     def _(client: viser.ClientHandle):
         client.scene.add_grid("grid", visible=False)
-        client.camera.position = init_pos
-        client.camera.wxyz = init_wxyz
-        client.camera.up_direction = real_up_direction # 绝对吻合真实场景的重力方向！
-
-    # ==========================================
-    # 🎬 UI 控制台：自动播放器与画质控制
-    # ==========================================
-    with server.gui.add_folder("🎬 4D 动画播放器"):
-        gui_time_idx = server.gui.add_slider("当前帧进度", min=0, max=max_frames, step=1, initial_value=0)
-        with server.gui.add_folder("控制面板", expand_by_default=True):
-            gui_btn_prev = server.gui.add_button("⏮️ 上一帧")
-            gui_btn_play = server.gui.add_button("▶️ 自动播放")
-            gui_btn_next = server.gui.add_button("⏭️ 下一帧")
-            
-    with server.gui.add_folder("🖥️ 渲染设置 (完全自适应)"):
-        gui_res_h = server.gui.add_slider("基准清晰度 (纵向像素)", min=400, max=1200, step=100, initial_value=800)
-        gui_reset_cam = server.gui.add_button("🔄 迷路一键回放")
-
-    # --- 按钮绑定逻辑 ---
-    @gui_btn_play.on_click
-    def _(_):
-        play_state.is_playing = not play_state.is_playing
-        gui_btn_play.name = "⏸️ 暂停播放" if play_state.is_playing else "▶️ 自动播放"
-
-    @gui_btn_prev.on_click
-    def _(_):
-        play_state.is_playing = False
-        gui_btn_play.name = "▶️ 自动播放"
-        gui_time_idx.value = max(0, gui_time_idx.value - 1)
-
-    @gui_btn_next.on_click
-    def _(_):
-        play_state.is_playing = False
-        gui_btn_play.name = "▶️ 自动播放"
-        gui_time_idx.value = min(max_frames, gui_time_idx.value + 1)
-
-    @gui_reset_cam.on_click
-    def _(_):
-        for client in server.get_clients().values():
-            client.camera.position = init_pos
-            client.camera.wxyz = init_wxyz
+        c2w = get_c2w_from_colmap(train_cameras[0])
+        client.camera.position = c2w[:3, 3]
+        client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
 
     while True:
-        # --- 自动播放推进 ---
-        if play_state.is_playing:
-            next_frame = gui_time_idx.value + 1
-            if next_frame > max_frames:
-                next_frame = 0 # 循环播放
-            gui_time_idx.value = next_frame
-
         clients = server.get_clients()
+
+        # 播放逻辑
+        if gui_play.value:
+            gui_frame.value = (gui_frame.value + 1) % (max_frames + 1)
+
+        current_idx = int(gui_frame.value)
+        base_cam = train_cameras[current_idx]
+
         for client_id, client in clients.items():
-            cam_state = client.camera
+            if gui_mode.value == "原画轨迹播放 (100%安全高清)":
+                # 🌟 核心真理：不做任何修改，直接把原版相机塞进渲染器！和离线渲染一模一样！
+                view_cam = base_cam
+                
+                # 让网页的相机视角自动跟随原始轨迹移动
+                c2w = get_c2w_from_colmap(base_cam)
+                client.camera.position = c2w[:3, 3]
+                client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
             
-            # ==========================================
-            # 🌟 核心修复 2：自适应画幅与 FOV (拒绝拉伸与黑边)
-            # ==========================================
-            aspect = cam_state.aspect # 获取浏览器当前长宽比
-            H = int(gui_res_h.value)
-            W = int(H * aspect)       # 宽度动态适应浏览器，严丝合缝！
-            
-            # 维持原版纵向视野，横向视野根据浏览器动态展开
-            fovy = c0.FoVy 
-            fovx = 2 * math.atan(math.tan(fovy / 2) * aspect)
-            
-            # ==========================================
-            # 🌟 核心修复 3：标准坐标系转换 (真实自由漫游)
-            # ==========================================
-            c2w_opengl = np.eye(4)
-            c2w_opengl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
-            c2w_opengl[:3, 3] = cam_state.position
-            
-            # Viser 转 3DGS 标准操作
-            c2w_opencv = c2w_opengl.copy()
-            c2w_opencv[:, 1:3] *= -1 
-            w2c_opencv = np.linalg.inv(c2w_opencv)
-            
-            R = w2c_opencv[:3, :3].T 
-            T = w2c_opencv[:3, 3]
-            
-            # 构建绝对安全的 Torch 矩阵
-            world_view_transform = torch.tensor(getWorld2View2(R, T, np.array([0.0, 0.0, 0.0]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
-            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
-            full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
-            
-            # ==========================================
-            # 🌟 核心修复 4：克隆夺舍 (保证离线级渲染画质)
-            # ==========================================
-            # 直接深拷贝原版相机，保留一切隐藏的 PyTorch 属性
-            view_cam = copy.deepcopy(c0)
-            view_cam.image_width = W
-            view_cam.image_height = H
-            view_cam.FoVy = fovy
-            view_cam.FoVx = fovx
-            view_cam.world_view_transform = world_view_transform
-            view_cam.projection_matrix = projection_matrix
-            view_cam.full_proj_transform = full_proj_transform
-            view_cam.camera_center = world_view_transform.inverse()[3, :3]
-            
-            # 注入 4D 动画时间属性
-            current_time_idx = int(gui_time_idx.value)
-            view_cam.fid = current_time_idx
-            view_cam.time = float(current_time_idx / max(1, max_frames))
-            if hasattr(view_cam, 'timestamp'):
-                view_cam.timestamp = view_cam.time
-            
-            # --- 渲染 ---
+            else:
+                # 🌟 自由漫游模式：允许你接管相机
+                cam_state = client.camera
+                aspect = cam_state.aspect
+                fovy = cam_state.fov
+                fovx = 2 * math.atan(math.tan(fovy / 2) * aspect)
+
+                c2w_opengl = np.eye(4)
+                c2w_opengl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
+                c2w_opengl[:3, 3] = cam_state.position
+                c2w_opencv = c2w_opengl.copy()
+                c2w_opencv[:, 1:3] *= -1
+
+                w2c = np.linalg.inv(c2w_opencv)
+                R = w2c[:3, :3].T
+                T = w2c[:3, 3]
+
+                wvt = torch.tensor(getWorld2View2(R, T, np.array([0.,0.,0.]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
+                proj = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+                full_proj = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
+                cam_center = wvt.inverse()[3, :3]
+
+                view_cam = ProxyCam(base_cam)
+                view_cam.override_wvt = wvt
+                view_cam.override_proj = proj
+                view_cam.override_full = full_proj
+                view_cam.override_center = cam_center
+                view_cam.override_w = int(800 * aspect)
+                view_cam.override_h = 800
+                view_cam.override_fovx = fovx
+                view_cam.override_fovy = fovy
+
+            # 执行渲染！
             render_pkg = render(view_cam, gaussians, pipe, background)
             rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
-            
-            # 直接铺满整个网页背景！
             img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+
+            # 发送给网页
             client.scene.set_background_image(img_np, format="jpeg")
-            
-        time.sleep(0.02) # 控制在最高约 50fps
+
+        time.sleep(0.02)
 
 if __name__ == "__main__":
     parser = ArgumentParser()
