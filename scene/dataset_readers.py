@@ -402,6 +402,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
     # 取传入参数的一半，但为了防止显存溢出和噪点泛滥，最高绝不超过 10 万！
     target_pts = int(num_pts)
     init_seed_pts = min(int(target_pts / 2), 100_000) 
+    # init_seed_pts = int(target_pts / 2)
     
     print(f"🚀 [加速补丁] 传入目标点数 {target_pts}，正在安全注入 {init_seed_pts} 个随机初始点...")
     
