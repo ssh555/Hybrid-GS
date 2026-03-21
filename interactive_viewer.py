@@ -221,8 +221,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             x0 = (canvas_w - render_w) // 2
             canvas[y0:y0+render_h, x0:x0+render_w] = img_np
 
-            # 发送给前端 (使用了 jpeg, jpeg_quality=100 以兼顾最高画质与传输帧率)
-            client.scene.set_background_image(canvas, format="jpeg", jpeg_quality=100)
+            client.scene.set_background_image(canvas, format="png")
 
         # 限制最高空转帧率，防止 CPU 占用过高
         time.sleep(0.01)
