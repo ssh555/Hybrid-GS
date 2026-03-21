@@ -168,7 +168,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     for i in range(0, len(train_cams), max_frames):
         view_cams.append(train_cams[i:i+max_frames])
     max_cams = len(view_cams)
-    print(f"[渲染器] 数据集共有 {len(train_cams)} 图像，分为 {len(view_cams)} 个视角，每个视角最多 {max_cams} 帧")
+    print(f"[渲染器] 数据集共有 {len(train_cams)} 图像，分为 {len(view_cams)} 个视角，每个视角最多 {max_frames} 帧")
 
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
