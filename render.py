@@ -75,7 +75,7 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
 
     video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
     print(f"\n[渲染器] 正在合成当前视角的动态视频: {video_path}")
-    imageio.mimwrite(video_path, frames_rgb, fps=24, quality=8)
+    imageio.mimwrite(video_path, frames_rgb, fps=30, quality=8)
     print(f"[渲染器] 圆满完成！请去 {render_dir} 文件夹查看带名称标注的序列帧！")
 
 if __name__ == "__main__":

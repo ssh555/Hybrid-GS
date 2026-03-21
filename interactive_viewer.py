@@ -16,31 +16,6 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 
 # ==============================
-# SLERP
-# ==============================
-def slerp(q1, q2, t):
-    q1 = q1 / np.linalg.norm(q1)
-    q2 = q2 / np.linalg.norm(q2)
-    dot = np.dot(q1, q2)
-
-    if dot < 0:
-        q2 = -q2
-        dot = -dot
-
-    if dot > 0.9995:
-        result = q1 + t * (q2 - q1)
-        return result / np.linalg.norm(result)
-
-    theta_0 = np.arccos(dot)
-    theta = theta_0 * t
-
-    q3 = q2 - q1 * dot
-    q3 /= np.linalg.norm(q3)
-
-    return q1 * np.cos(theta) + q3 * np.sin(theta)
-
-
-# ==============================
 # ProxyCam（修复版）
 # ==============================
 class ProxyCam:
@@ -152,12 +127,13 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     gaussians.restore(model_params, None)
 
     server = viser.ViserServer(port=8080)
-    play_state = {"playing": False, "direction": 1}
+    play_state = {"playing": False}
 
     # ==========================================
     # 🎬 强大的 UI 控制台
     # ==========================================
     with server.gui.add_folder("🎬 控制台"):
+        # 保持整数步进的固定机位切换，确保 100% 贴合完美原机位
         cam_id = server.gui.add_slider("🎥 相机机位切换", 0, max_cams-1, 1, 0)
 
         with server.gui.add_folder("播放控制", expand_by_default=True):
@@ -165,9 +141,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             btn_pause = server.gui.add_button("⏸ 暂停")
 
         slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
-        slider_speed = server.gui.add_slider("⚡ 播放速度", 0.25, 2.0, 0.05, 1.0)
+        slider_speed = server.gui.add_slider("⚡ 播放速度倍率", 0.25, 2.0, 0.05, 1.0)
         
-        # [新增] 原生级画质控制器
         gui_res_scale = server.gui.add_slider("🖥️ 原生渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
 
     @btn_play.on_click
@@ -176,12 +151,25 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     @btn_pause.on_click
     def _(_): play_state["playing"] = False
 
-    while True:
-        if play_state["playing"]:
-            slider_frame.value += slider_speed.value
+    # ==========================================
+    # 🌟 真实时间戳初始化 (对齐离线视频的物理时长)
+    # ==========================================
+    last_update_time = time.time()
+    TARGET_FPS = 30.0  # 假设你离线合成的视频是 30 FPS
 
-        if slider_frame.value > max_frames:
-            slider_frame.value = 0
+    while True:
+        # 计算距离上一次渲染过了多少秒 (Delta Time)
+        current_time = time.time()
+        dt = current_time - last_update_time
+        last_update_time = current_time
+
+        if play_state["playing"]:
+            # 使用真实时间推进，保证无论渲染画质倍率多高（渲染多卡），物理播放总时长绝对恒定！
+            slider_frame.value += TARGET_FPS * dt * slider_speed.value
+
+        # 无缝循环播放
+        if slider_frame.value >= max_frames:
+            slider_frame.value %= max_frames
 
         frame_idx = int(slider_frame.value)
         selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
@@ -233,10 +221,11 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             x0 = (canvas_w - render_w) // 2
             canvas[y0:y0+render_h, x0:x0+render_w] = img_np
 
-            # 发送给前端 (使用 jpeg 压缩速度更快，提升帧率)
-            client.scene.set_background_image(canvas, format="png")
+            # 发送给前端 (使用了 jpeg, jpeg_quality=100 以兼顾最高画质与传输帧率)
+            client.scene.set_background_image(canvas, format="jpeg", jpeg_quality=100)
 
-        time.sleep(0.02)
+        # 限制最高空转帧率，防止 CPU 占用过高
+        time.sleep(0.01)
 
 
 # ==============================
