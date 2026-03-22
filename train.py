@@ -236,7 +236,6 @@ if __name__ == "__main__":
     parser.add_argument("--val", action="store_true", default=False)
 
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
         
     cfg = OmegaConf.load(args.config)
 
