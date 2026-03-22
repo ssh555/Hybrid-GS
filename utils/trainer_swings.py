@@ -66,8 +66,11 @@ class TrainerSWinGS(Trainer4DGS):
             gt_image, viewpoint_cam = batch_data
             gt_image = gt_image.cuda()
             
-            # 优先找 fid，找不到就直接用当前测试图片的顺序索引 idx
-            frame_id = getattr(viewpoint_cam, 'fid', idx)
+            # 优先从文件名中精准提取真实帧号
+            try:
+                frame_id = int(viewpoint_cam.image_name.split('_')[-1])
+            except:
+                frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
             
             # 获取特定帧的干净掩码，过滤掉不在当前时间出生的点
             active_mask = self._get_active_dynamic_mask(frame_id)
