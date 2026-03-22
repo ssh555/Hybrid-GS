@@ -118,33 +118,14 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    # ==========================================
-    # 🌟 核心突破：计算场景绝对真实的物理重力方向！
-    # ==========================================
-    up_vectors = []
-    for cam in train_cams:
-        c2w = get_c2w(cam)
-        # 在 OpenGL 坐标系下，相机的 +Y 轴代表它的上方
-        up_vectors.append(c2w[:3, 1])
-    
-    # 取所有相机的平均上方，作为世界基准上方
-    avg_up = np.mean(up_vectors, axis=0)
-    avg_up /= np.linalg.norm(avg_up)
-    print(f"[引擎] 成功计算场景真实重力基准向量: {avg_up}")
-
     server = viser.ViserServer(port=8080)
 
-    @server.on_client_connect
-    def _(client: viser.ClientHandle):
-        # 强制接管前端陀螺仪，杜绝轨道相机自动 180 度乱翻转！
-        client.camera.up_direction = tuple(avg_up)
 
     # ==========================================
     # 🎬 UI 控制台
     # ==========================================
     with server.gui.add_folder("🎬 导播台面板"):
         gui_free_roam = server.gui.add_checkbox("🕹️ 启用自由漫游", initial_value=False)
-        gui_invert_cam = server.gui.add_checkbox("🔄 画面倒立急救 (点我翻转)", initial_value=False)
         gui_sync_cam = server.gui.add_button("🎯 视角归位 (一键对齐原轨迹)")
         
         cam_id = server.gui.add_slider("🎥 原版机位切换", 0, max_cams-1, 1, 0)
@@ -209,11 +190,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 c2w_gl = np.eye(4)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
-                
-                # 🌟 如果发生极端坐标倒立，提供一键数学急救 (绕局部Z轴旋转180度)
-                if gui_invert_cam.value:
-                    rot_180 = np.diag([-1, -1, 1, 1])
-                    c2w_gl = c2w_gl @ rot_180
                 
                 # GL 完美转 CV
                 c2w_cv = c2w_gl.copy()

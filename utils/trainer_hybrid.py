@@ -49,6 +49,24 @@ class TrainerHybrid(TrainerSWinGS):
         
         training_dataset = self.scene.getTrainCameras()
         
+        # ==========================================
+        # 🌟 核心修复：建立 [帧号 -> 相机索引] 的全映射字典
+        # 严格基于 camxx_xxxx 命名规范，完美支持多相机与乱序
+        # ==========================================
+        import random
+        self.frames_dict = {}
+        for idx, cam in enumerate(training_dataset):
+            try:
+                # 提取 cam.image_name (如 "cam00_0150") 的后半段作为帧号
+                frame_id = int(cam.image_name.split('_')[-1])
+            except:
+                # 极端情况 fallback
+                frame_id = getattr(cam, 'fid', idx % self.total_frames)
+                
+            if frame_id not in self.frames_dict:
+                self.frames_dict[frame_id] = []
+            self.frames_dict[frame_id].append(idx)
+
         if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
             num_pts = self.gaussians.get_xyz.shape[0]
             self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
@@ -83,8 +101,16 @@ class TrainerHybrid(TrainerSWinGS):
             
             loss = 0
             for batch_idx in range(batch_size):
-                frame_id = randint(self.window_start, self.window_end)
-                gt_image, viewpoint_cam = training_dataset[frame_id % len(training_dataset)]
+                # 1. SWinGS 官方算法：在当前活跃的滑动窗口内进行均匀随机抽样 (SGD核心)
+                t_id = random.randint(self.window_start, self.window_end)
+                
+                # 2. 从预处理的字典中，随机抽取该帧对应的一个相机视角
+                # 这个做法 100% 避免了之前的数组越界和单视角 Bug
+                dataset_idx = random.choice(self.frames_dict[t_id])
+                
+                # 3. 提取真实图像和相机位姿
+                frame_id = t_id
+                gt_image, viewpoint_cam = training_dataset[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)

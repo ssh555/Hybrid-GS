@@ -18,12 +18,25 @@ class BaseTrainer:
             self.args.time_duration = [self.args.time_duration[0] / self.dataset.frame_ratio, 
                                        self.args.time_duration[1] / self.dataset.frame_ratio]
 
-        # 动态填补 total_frames 属性，兼容标准 COLMAP 数据集
+        # 动态填补 total_frames 属性，严格解析 camxx_xxxx 命名规范
         if not hasattr(self.dataset, 'total_frames'):
             img_path = os.path.join(self.dataset.source_path, self.dataset.images)
-            num_frames = len(glob.glob(os.path.join(img_path, "*")))
-            self.dataset.total_frames = num_frames
-            print(f"[数据注入] 成功为当前数据集绑定 total_frames: {num_frames}")
+            img_files = glob.glob(os.path.join(img_path, "*"))
+            max_frame = 0
+            for f in img_files:
+                basename = os.path.basename(f)
+                name_without_ext = os.path.splitext(basename)[0]
+                try:
+                    # 解析 camxx_xxxx 中的第二部分 xxxx
+                    parts = name_without_ext.split('_')
+                    if len(parts) >= 2:
+                        frame_idx = int(parts[-1])
+                        if frame_idx > max_frame:
+                            max_frame = frame_idx
+                except ValueError:
+                    continue
+            self.dataset.total_frames = max_frame + 1
+            print(f"\n[数据注入] 🎯 成功解析 camxx_xxxx 规范，绑定真实总帧数: {self.dataset.total_frames}")
 
         # 实例化统一的单例监控记录仪
         self.metrics_tracker = MetricsTracker()
