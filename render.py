@@ -87,7 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--rot_4d", action="store_true", default=True)
     parser.add_argument("--force_sh_3d", action="store_true", default=True)
-    parser.add_argument("--start_checkpoint", type=str, required=True)
+    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
     
     args = parser.parse_args()
     cfg = OmegaConf.load(args.config)

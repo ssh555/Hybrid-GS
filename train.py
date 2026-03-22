@@ -222,6 +222,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
     
     parser.add_argument("--gaussian_dim", type=int, default=3)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
