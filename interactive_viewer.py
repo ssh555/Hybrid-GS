@@ -269,7 +269,6 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
 
     parser.add_argument("--config", required=True)
-    parser.add_argument("--start_checkpoint", required=True)
 
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5,0.5])
