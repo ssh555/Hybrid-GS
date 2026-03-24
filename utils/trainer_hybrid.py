@@ -189,14 +189,9 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
                     
             iter_end.record()
-
             with torch.no_grad():
-                # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
-                     self.robust_hard_constraint_classifier()
-                # ====================================================================
-
-                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
+                # 1. 移除了硬顶拦截，让引擎永远能进来执行
+                if iteration < self.opt.densify_until_iter:
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if static:
                         self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
@@ -211,10 +206,27 @@ class TrainerHybrid(TrainerSWinGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            
+                            # ==========================================
+                            # 🛡️ 显存保命机制 (完美呼吸版)：只断增殖，不断清理！
+                            # ==========================================
+                            current_pts = self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)
+                            max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
+                            if max_points <= 0: max_points = 4000000
+                            
+                            # 默认使用 YAML 里的阈值 (如 0.0002)
+                            active_grad_threshold = self.opt.densify_grad_threshold
+                            
+                            # 如果触顶，将阈值拉爆，实现“只剪枝，不分裂”
+                            if current_pts >= max_points:
+                                active_grad_threshold = 99999.0 
+                                
+                            self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
+                    # 2. 扫地机器人永远按时上班，不受点数硬顶限制！
                     if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
                         self.gaussians.reset_opacity()
                         
