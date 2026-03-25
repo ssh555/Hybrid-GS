@@ -252,18 +252,6 @@ class TrainerHybrid(TrainerSWinGS):
                         self.env_map_optimizer.step()
                         self.env_map_optimizer.zero_grad(set_to_none=True)
 
-                    # ==========================================
-                    # 🚀 唤醒沉睡的冰冻魔法：每 1000 步执行一次硬约束判定
-                    # 把它变成静态点后，以后再也不用算 4D 变形了，速度直接起飞！
-                    # ==========================================
-                    if iteration > self.opt.densify_from_iter and iteration % 1000 == 0:
-                        self.robust_hard_constraint_classifier()
-
-                    # freeze_start_iter = self.opt.iterations / 3
-                    
-                    # if iteration > freeze_start_iter and iteration % 1000 == 0:
-                    #     self.robust_hard_constraint_classifier()
-
                 if iteration % 10 == 0:
                     postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]", "Pts4" : f"{self.gaussians.get_xyz.shape[0]}", "Pts3" : f"{self.gaussians.get_static_xyz.shape[0] if static else 0}"}
                     progress_bar.set_postfix(postfix)
