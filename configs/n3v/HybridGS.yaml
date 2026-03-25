@@ -49,7 +49,7 @@ OptimizationParams:
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
   densification_interval: 100 
-  opacity_reset_interval: 3000
+  opacity_reset_interval: 300000
   densify_from_iter: 500 
   densify_until_iter: 70000
   densify_grad_threshold: 0.0002
@@ -65,6 +65,6 @@ OptimizationParams:
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  tau_avg: 0.005             # HybridGS 硬约束：平均位移阈值
-  tau_max: 0.02             # HybridGS 硬约束：最大瞬时位移阈值
-  lambda_d: 0.005             # HybridGS 软约束：位移收敛正则化系数
+  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
+  tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
+  lambda_d: 0.05             # HybridGS 软约束：位移收敛正则化系数

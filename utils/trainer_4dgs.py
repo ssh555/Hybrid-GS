@@ -237,16 +237,24 @@ class Trainer4DGS(BaseTrainer):
                                 current_pts = self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)
                                 max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
                                 if max_points <= 0: max_points = 4000000
-                                
-                                # 默认使用 YAML 里的阈值 (如 0.0002)
+                                    
+                                # 默认使用 YAML 里的阈值
                                 active_grad_threshold = self.opt.densify_grad_threshold
+                                active_grad_t_threshold = self.opt.densify_grad_t_threshold
                                 
-                                # 如果触顶，将阈值拉爆，实现“只剪枝，不分裂”
+                                # 🚨 【终极拦截】：如果触顶，将【空间】和【时间】的生育阈值同时拉爆！
                                 if current_pts >= max_points:
                                     active_grad_threshold = 99999.0 
+                                    active_grad_t_threshold = 99999.0 
                                     
-                                self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
-                                
+                                # 注意最后参数的替换：传入 active_grad_t_threshold
+                                self.gaussians.densify_and_prune(
+                                    active_grad_threshold, 
+                                    self.opt.thresh_opa_prune, 
+                                    self.scene.cameras_extent, 
+                                    size_threshold, 
+                                    active_grad_t_threshold 
+                                )
                                 if hasattr(self.gaussians, 'dynamic2static'):
                                     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                     

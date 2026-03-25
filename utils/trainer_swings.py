@@ -25,9 +25,19 @@ class TrainerSWinGS(Trainer4DGS):
         """控制时间窗口滑动与高斯寿命延长"""
         if iteration > 0 and iteration % self.slide_interval == 0:
             if self.window_end < self.total_frames - 1:
+                # 记录即将被淘汰的旧起始帧
+                old_start = self.window_start
                 self.window_start += 1
                 self.window_end += 1
-                
+
+                # ===================================================
+                # 🧹 动态内存垃圾回收：窗口一走，立刻把旧照片踢出内存！
+                # ===================================================
+                if hasattr(self, 'frames_dict') and hasattr(self, 'window_cache'):
+                    if old_start in self.frames_dict:
+                        for d_idx in self.frames_dict[old_start]:
+                            self.window_cache.pop(d_idx, None)  # 物理释放内存
+
                 with torch.no_grad():
                     if hasattr(self.gaussians, '_expire_frame') and self.gaussians._expire_frame.numel() > 0:
                         alive_idx = self.gaussians._expire_frame == (self.window_end - 1)
@@ -125,6 +135,11 @@ class TrainerSWinGS(Trainer4DGS):
                 self.frames_dict[frame_id] = []
             self.frames_dict[frame_id].append(idx)
 
+        # ==========================================
+        # 🚀 植入动态滑动缓存池：永远只占用当前窗口的内存！
+        # ==========================================
+        self.window_cache = {}
+
         # SWinGS 特有：初始化生命周期张量
         if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
             num_pts = self.gaussians.get_xyz.shape[0]
@@ -170,7 +185,15 @@ class TrainerSWinGS(Trainer4DGS):
                 
                 # 3. 提取真实图像和相机位姿
                 frame_id = t_id
-                gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                # ===================================================
+                # 🚀 动态缓存读取机制
+                # ===================================================
+                if dataset_idx not in self.window_cache:
+                    # 如果内存里没有（新进窗口的帧），就去硬盘读一次，并存入缓存
+                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
+                
+                # 从内存中光速读取！
+                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
@@ -274,15 +297,23 @@ class TrainerSWinGS(Trainer4DGS):
                             max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
                             if max_points <= 0: max_points = 4000000
                             
-                            # 默认使用 YAML 里的阈值 (如 0.0002)
+                            # 默认使用 YAML 里的阈值
                             active_grad_threshold = self.opt.densify_grad_threshold
+                            active_grad_t_threshold = self.opt.densify_grad_t_threshold
                             
-                            # 如果触顶，将阈值拉爆，实现“只剪枝，不分裂”
+                            # 🚨 【终极拦截】：如果触顶，将【空间】和【时间】的生育阈值同时拉爆！
                             if current_pts >= max_points:
                                 active_grad_threshold = 99999.0 
+                                active_grad_t_threshold = 99999.0 
                                 
-                            self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
-                            
+                            # 注意最后参数的替换：传入 active_grad_t_threshold
+                            self.gaussians.densify_and_prune(
+                                active_grad_threshold, 
+                                self.opt.thresh_opa_prune, 
+                                self.scene.cameras_extent, 
+                                size_threshold, 
+                                active_grad_t_threshold 
+                            )
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
