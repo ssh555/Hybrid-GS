@@ -142,7 +142,15 @@ class TrainerHybrid(TrainerSWinGS):
                     o = alpha.clamp(1e-6, 1-1e-6)
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
-
+                    
+                # =============== [核心机制] HybridGS 时间解耦软约束 ===============
+                dynamic_mask = self.gaussians._mask_dynamic != 1
+                if dynamic_mask.any():
+                    # [修复 Bug & 提速] dt=1.0 获取真实速度，且仅计算动态点！
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=dynamic_mask)
+                    l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
+                    current_loss += l_reg_d
+                # ====================================================================
 
                 if self.opt.lambda_rigid > 0:
                     k = 20
@@ -169,38 +177,6 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_radii_static.append(radii_static)
                     batch_visibility_filter_static.append(visibility_filter_static)
 
-            # =============== [核心机制] HybridGS 时间解耦软约束 ===============
-            # 🚀 提速点 1：移出 Batch 循环，每步只算 1 次，直接省下 75% 算力！
-            if getattr(self, 'lambda_d', 0.0) > 0:
-                if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                    # 只要在这个窗口内活着的点，统统纳入考察范围
-                    alive_window_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
-                else:
-                    alive_window_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
-                
-                active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_window_mask
-                active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
-                
-                if active_indices.numel() > 0:
-                    # 🚀 提速点 2：如果点数超过 10 万，随机抽取 10 万个算约束！
-                    # 保证算力开销永远被死死封锁在几毫秒以内，不管总点数涨到几百万都绝对不卡！
-                    if active_indices.numel() > 30000:
-                        perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
-                        active_indices = active_indices[perm]
-                        
-                        # 重新生成一个仅激活这 10w 个点的掩码
-                        sampled_mask = torch.zeros_like(active_dynamic_mask)
-                        sampled_mask[active_indices] = True
-                        active_dynamic_mask = sampled_mask
-
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
-                    
-                    # 保持和之前一样的数学期望，需除以 batch_size
-                    l_reg_d_loss = (self.lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
-                    l_reg_d_loss.backward()
-                    loss += l_reg_d_loss.item()
-            # ===========================================================================
-
             if batch_size > 1:
                 visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
                 visibility_filter = visibility_count > 0
@@ -226,9 +202,14 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
                     
             iter_end.record()
+
             with torch.no_grad():
-                # 1. 移除了硬顶拦截，让引擎永远能进来执行
-                if iteration < self.opt.densify_until_iter:
+                # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
+                if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
+                     self.robust_hard_constraint_classifier()
+                # ====================================================================
+
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if static:
                         self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
@@ -243,36 +224,10 @@ class TrainerHybrid(TrainerSWinGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            
-                            # ==========================================
-                            # 🛡️ 显存保命机制 (完美呼吸版)：只断增殖，不断清理！
-                            # ==========================================
-                            current_pts = self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)
-                            max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
-                            if max_points <= 0: max_points = 4000000
-                            
-                            # 默认使用 YAML 里的阈值
-                            active_grad_threshold = self.opt.densify_grad_threshold
-                            active_grad_t_threshold = self.opt.densify_grad_t_threshold
-                            
-                            # 🚨 【终极拦截】：如果触顶，将【空间】和【时间】的生育阈值同时拉爆！
-                            if current_pts >= max_points:
-                                active_grad_threshold = 99999.0 
-                                active_grad_t_threshold = 99999.0 
-                                
-                            # 注意最后参数的替换：传入 active_grad_t_threshold
-                            self.gaussians.densify_and_prune(
-                                active_grad_threshold, 
-                                self.opt.thresh_opa_prune, 
-                                self.scene.cameras_extent, 
-                                size_threshold, 
-                                active_grad_t_threshold 
-                            )
-                            
+                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
-                    # 2. 扫地机器人永远按时上班，不受点数硬顶限制！
                     if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
                         self.gaussians.reset_opacity()
                         
