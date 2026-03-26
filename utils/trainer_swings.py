@@ -195,7 +195,11 @@ class TrainerSWinGS(Trainer4DGS):
                 gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
-                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
+                # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
+                # 🚀 替换为带有防御掩码的终极版：
+                active_mask = self._get_active_dynamic_mask(frame_id)
+                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
+
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 alpha = render_pkg["alpha"]
                 

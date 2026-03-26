@@ -16,48 +16,48 @@ class TrainerHybrid(TrainerSWinGS):
         self.tau_max = getattr(args, 'tau_max', 0.05)
         self.lambda_d = getattr(args, 'lambda_d', 0.1)
 
+        # 读取消融开关，默认全开（满血 HybridGS）
+        self.use_soft = getattr(args, 'use_soft_constraint', True)
+        self.use_hard = getattr(args, 'use_hard_constraint', True)
+        self.use_mc = getattr(args, 'use_mc_sampling', True)
+
     def robust_hard_constraint_classifier(self):
         """核心机制：鲁棒硬约束判定，将低位移高斯永久冻结为静态背景"""
         with torch.no_grad():
-            dynamic_mask = self.gaussians._mask_dynamic != 1
+            # 🚀 修复用户发现的盲点：结合 SWinGS，只提取“当前窗口活着”的动态点
+            if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
+            else:
+                alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
+                
+            dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
             if not dynamic_mask.any():
                 return
             
-            # ==========================================================
-            # [毕设核心重构]：多重时间切片蒙特卡洛采样 (Monte Carlo Temporal Sampling)
-            # 打破代数枷锁，完美逼近连续时间积分，同时避免显存爆炸！
-            # ==========================================================
             t_base = self.gaussians.get_t
-            num_samples = 8  # 采样 8 个时间节点，足以完美拟合 MLP 的连续平滑曲线！
             
-            # 在 [0.1, 1.0] 的相对时间域内，生成 8 个均匀分布的时间偏移量
-            # dt_steps 形状: [8] -> [8, 1]
-            dt_steps = torch.linspace(0.1, 1.0, steps=num_samples, device="cuda").unsqueeze(-1)
+            # 🌟 接入消融开关：MC 采样 vs 传统双点采样
+            if self.use_mc:
+                num_samples = 8
+                dt_steps = torch.linspace(0.1, 1.0, steps=num_samples, device="cuda").unsqueeze(-1)
+            else:
+                num_samples = 2
+                dt_steps = torch.tensor([0.05, 1.0], device="cuda").unsqueeze(-1)
             
             displacement_list = []
-            # 循环 8 次前向传播 (由于是纯推理且并行度高，耗时极短，通常在 2ms 以内)
             for i in range(num_samples):
-                # 评估当前点在 t_base + dt 时的运动速度
                 _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_base + dt_steps[i], mask=dynamic_mask)
                 displacement_list.append(v.norm(dim=-1))
             
-            # 将 8 个时刻的位移堆叠起来: 形状 [N_dynamic_points, 8]
             all_displacements = torch.stack(displacement_list, dim=1)
-            
-            # 真正的轨迹运动数学期望 (Average)
             r_avg = all_displacements.mean(dim=1)
-            
-            # 真正的瞬时最大跳变 (Max)
             r_max = all_displacements.max(dim=1)[0]
             
-            # 此时 r_max 理论上最大可达 8 * r_avg，完美释放 tau_max 的拦截威力！
             is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
             
             if is_static.any():
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
-                # 斩断！设为 1 (静态)
                 self.gaussians._mask_dynamic[global_static_indices] = 1
-                # 物理抹除 3D4DGS 的时间戳属性，阻止形变网络响应
                 self.gaussians._t.data[global_static_indices] = 0.0
 
     def train(self):
@@ -179,60 +179,60 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_visibility_filter_static.append(visibility_filter_static)
 
             # =========================================================================
-            # 🚀 [终极融合架构] HybridGS 约束机制 (已移出 Batch 循环，速度暴增 400%！)
+            # 🚀 [终极融合架构] HybridGS 约束机制 (统一 Backward + 消融开关控制)
             # =========================================================================
-            
-            # 1. 🌟 预热机制 (Warm-up)：前 10000 步彻底放飞，防止雾化逃避！
-            warmup_start = 10000
-            warmup_end = 20000
-            if iteration < warmup_start:
-                current_lambda_d = 0.0
-            elif iteration > warmup_end:
-                current_lambda_d = self.lambda_d
-            else:
-                current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
+            total_reg_loss = 0.0  # 🚀 必修修复 3：统一梯度收集池
 
-            # 2. 🌊 动态点软约束 (仅对当前滑动窗口存活的点)
-            if current_lambda_d > 0:
-                if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                    # 注意：在 batch 外面，用窗口起始和结束范围作为存活判断！
-                    alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
-                else:
-                    alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
-                
-                active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
-                active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
-                
-                if active_indices.numel() > 0:
-                    if active_indices.numel() > 30000:
-                        perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
-                        active_indices = active_indices[perm]
-                        sampled_mask = torch.zeros_like(active_dynamic_mask)
-                        sampled_mask[active_indices] = True
-                        active_dynamic_mask = sampled_mask
+            # --- 1. 软约束模块 (用 self.use_soft 控制) ---
+            if self.use_soft:
+                warmup_start, warmup_end = 10000, 20000
+                if iteration < warmup_start: current_lambda_d = 0.0
+                elif iteration > warmup_end: current_lambda_d = self.lambda_d
+                else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
 
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
-                    # 因为在 batch 外，除以 batch_size 保证数学期望一致
-                    l_reg_d_loss = (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
-                    l_reg_d_loss.backward()
-                    loss += l_reg_d_loss.item()
+                if current_lambda_d > 0:
+                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                        alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
+                    else:
+                        alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
+                    
+                    active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
+                    active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
+                    
+                    if active_indices.numel() > 0:
+                        # 🌟 蒙特卡洛空间采样消融 (用 self.use_mc 控制)
+                        if self.use_mc and active_indices.numel() > 30000:
+                            perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
+                            active_indices = active_indices[perm]
+                            sampled_mask = torch.zeros_like(active_dynamic_mask)
+                            sampled_mask[active_indices] = True
+                            active_dynamic_mask = sampled_mask
 
-            # 3. 🧊 静态点绝对物理锁死 (防止背景抖动)
-            static_mask = (self.gaussians._mask_dynamic == 1)
-            if static_mask.any():
-                static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                if static_indices.numel() > 30000:
-                    perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
-                    static_indices = static_indices[perm]
-                    sampled_static_mask = torch.zeros_like(static_mask)
-                    sampled_static_mask[static_indices] = True
-                    static_mask = sampled_static_mask
+                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
+                        l_reg_d_loss = (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
+                        total_reg_loss += l_reg_d_loss
 
-                _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
-                # 权重 10.0，且除以 batch_size 对齐梯度
-                l_hard_static_loss = (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
-                l_hard_static_loss.backward()
-                loss += l_hard_static_loss.item()
+            # --- 2. 硬约束的静态物理锁死模块 (用 self.use_hard 控制) ---
+            if self.use_hard:
+                static_mask = (self.gaussians._mask_dynamic == 1)
+                if static_mask.any():
+                    static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
+                    # 🌟 蒙特卡洛空间采样消融
+                    if self.use_mc and static_indices.numel() > 30000:
+                        perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
+                        static_indices = static_indices[perm]
+                        sampled_static_mask = torch.zeros_like(static_mask)
+                        sampled_static_mask[static_indices] = True
+                        static_mask = sampled_static_mask
+
+                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
+                    l_hard_static_loss = (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
+                    total_reg_loss += l_hard_static_loss
+
+            # 🚀 必修修复 3：统一单次 Backward，彻底解决梯度 scale 混乱！
+            if isinstance(total_reg_loss, torch.Tensor) and total_reg_loss.requires_grad:
+                total_reg_loss.backward()
+                loss += total_reg_loss.item()
             # =========================================================================
 
             if batch_size > 1:
@@ -243,7 +243,8 @@ class TrainerHybrid(TrainerSWinGS):
                 batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                 batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
 
-                if static:
+                has_static_in_batch = len(batch_point_grad_static) > 0
+                if has_static_in_batch:
                     visibility_count_static = torch.stack(batch_visibility_filter_static,1).sum(1)
                     visibility_filter_static = visibility_count_static > 0
                     radii_static = torch.stack(batch_radii_static,1).max(1)[0]
@@ -269,7 +270,7 @@ class TrainerHybrid(TrainerSWinGS):
                 freeze_start_iter = self.opt.iterations // 5
                 
                 # 2. 完美绑定：只在窗口即将滑动的那一刻 (模型对当前窗口拟合最完美时) 触发冻结！
-                if iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
                      self.robust_hard_constraint_classifier()
                 # ====================================================================
 

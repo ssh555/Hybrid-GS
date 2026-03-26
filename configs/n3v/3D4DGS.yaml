@@ -60,11 +60,3 @@ OptimizationParams:
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0
-  
-  # ==========================================================
-  # [新增] SWinGS 与 HybridGS 专属超参数
-  # ==========================================================
-  swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
-  tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
-  lambda_d: 0.05             # HybridGS 软约束：位移收敛正则化系数

@@ -68,3 +68,9 @@ OptimizationParams:
   tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
   lambda_d: 0.05             # HybridGS 软约束：位移收敛正则化系数
+  # ==========================================================
+  # [毕设专属] 消融实验控制开关 (Ablation Switches)
+  # ==========================================================
+  use_soft_constraint: True   # 是否开启软约束 (运动速度惩罚)
+  use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
+  use_mc_sampling: True       # 是否开启蒙特卡洛时间/空间采样 (提速与防抖)
