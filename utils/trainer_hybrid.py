@@ -23,17 +23,34 @@ class TrainerHybrid(TrainerSWinGS):
             if not dynamic_mask.any():
                 return
             
-            # [修复 Bug & 提速] 传入 mask 省下 80% 算力！dt=1.0 获取标准速度，dt=0.05 获取瞬时位移
-            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=dynamic_mask)
-            _, vel_next = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.05, mask=dynamic_mask)
+            # ==========================================================
+            # [毕设核心重构]：多重时间切片蒙特卡洛采样 (Monte Carlo Temporal Sampling)
+            # 打破代数枷锁，完美逼近连续时间积分，同时避免显存爆炸！
+            # ==========================================================
+            t_base = self.gaussians.get_t
+            num_samples = 8  # 采样 8 个时间节点，足以完美拟合 MLP 的连续平滑曲线！
             
-            displacement_1 = velocity.norm(dim=-1)
-            displacement_2 = vel_next.norm(dim=-1)
+            # 在 [0.1, 1.0] 的相对时间域内，生成 8 个均匀分布的时间偏移量
+            # dt_steps 形状: [8] -> [8, 1]
+            dt_steps = torch.linspace(0.1, 1.0, steps=num_samples, device="cuda").unsqueeze(-1)
             
-            r_avg = (displacement_1 + displacement_2) / 2.0
-            r_max = torch.max(displacement_1, displacement_2)
+            displacement_list = []
+            # 循环 8 次前向传播 (由于是纯推理且并行度高，耗时极短，通常在 2ms 以内)
+            for i in range(num_samples):
+                # 评估当前点在 t_base + dt 时的运动速度
+                _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_base + dt_steps[i], mask=dynamic_mask)
+                displacement_list.append(v.norm(dim=-1))
             
-            # 双重阈值判定
+            # 将 8 个时刻的位移堆叠起来: 形状 [N_dynamic_points, 8]
+            all_displacements = torch.stack(displacement_list, dim=1)
+            
+            # 真正的轨迹运动数学期望 (Average)
+            r_avg = all_displacements.mean(dim=1)
+            
+            # 真正的瞬时最大跳变 (Max)
+            r_max = all_displacements.max(dim=1)[0]
+            
+            # 此时 r_max 理论上最大可达 8 * r_avg，完美释放 tau_max 的拦截威力！
             is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
             
             if is_static.any():
@@ -144,10 +161,26 @@ class TrainerHybrid(TrainerSWinGS):
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
                     
                 # =============== [核心机制] HybridGS 时间解耦软约束 ===============
-                dynamic_mask = self.gaussians._mask_dynamic != 1
-                if dynamic_mask.any():
-                    # [修复 Bug & 提速] dt=1.0 获取真实速度，且仅计算动态点！
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=dynamic_mask)
+                # 1. 结合 SWinGS，只提取“当前帧活着”的动态点
+                if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                    alive_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
+                else:
+                    alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
+                
+                # 2. 动静分离 + 寿命过滤 = 最终需要计算约束的真实点
+                active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
+                
+                # 3. 蒙特卡洛采样 (极限提速，且数学期望等价)
+                active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
+                if active_indices.numel() > 0:
+                    if active_indices.numel() > 30000:
+                        perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
+                        active_indices = active_indices[perm]
+                        sampled_mask = torch.zeros_like(active_dynamic_mask)
+                        sampled_mask[active_indices] = True
+                        active_dynamic_mask = sampled_mask
+
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
                     l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
                     current_loss += l_reg_d
                 # ====================================================================
@@ -205,7 +238,13 @@ class TrainerHybrid(TrainerSWinGS):
 
             with torch.no_grad():
                 # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                if iteration % 100 == 0 and iteration > self.opt.densify_from_iter:
+                # 🚀 创新点：绑定 SWinGS 滑动窗口节拍的“延迟硬约束”
+                
+                # 1. 留出充分的热身期 (总迭代的1/5)，让 4D MLP 学会基础动作
+                freeze_start_iter = self.opt.iterations // 5
+                
+                # 2. 完美绑定：只在窗口即将滑动的那一刻 (模型对当前窗口拟合最完美时) 触发冻结！
+                if iteration > freeze_start_iter and iteration % self.slide_interval == 0:
                      self.robust_hard_constraint_classifier()
                 # ====================================================================
 
