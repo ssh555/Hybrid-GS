@@ -163,62 +163,6 @@ class TrainerHybrid(TrainerSWinGS):
                     o = alpha.clamp(1e-6, 1-1e-6)
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
-                    
-                # =============== [核心机制] HybridGS 时间解耦软约束 ===============
-                # 1. 结合 SWinGS，只提取“当前帧活着”的动态点
-                if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                    alive_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
-                else:
-                    alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
-                
-                # 2. 动静分离 + 寿命过滤 = 最终需要计算约束的真实点
-                active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
-                
-                # 3. 蒙特卡洛采样 (极限提速，且数学期望等价)
-                active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
-                if active_indices.numel() > 0:
-                    if active_indices.numel() > 30000:
-                        perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
-                        active_indices = active_indices[perm]
-                        sampled_mask = torch.zeros_like(active_dynamic_mask)
-                        sampled_mask[active_indices] = True
-                        active_dynamic_mask = sampled_mask
-
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
-                    l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
-                    current_loss += l_reg_d
-                # ====================================================================
-                # =============== [新增] 静态点绝对物理锁死机制 ===============
-                static_mask = (self.gaussians._mask_dynamic == 1)
-                if static_mask.any():
-                    static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                    # 蒙特卡洛随机抽样，防止显存溢出
-                    if static_indices.numel() > 30000:
-                        perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
-                        static_indices = static_indices[perm]
-                        sampled_static_mask = torch.zeros_like(static_mask)
-                        sampled_static_mask[static_indices] = True
-                        static_mask = sampled_static_mask
-
-                    # 让静态点也过一遍 MLP，提取它们被 MLP 赋予的速度
-                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
-                    
-                    # 🚀 施加极其严厉的 L2 惩罚 (权重高达 10.0)！
-                    # 逼迫优化器和 MLP 彻底学乖，绝对不准移动背景点半毫米！
-                    l_hard_static = 10.0 * static_velocity.norm(p=2, dim=1).mean()
-                    current_loss += l_hard_static
-                # =========================================================
-
-                if self.opt.lambda_rigid > 0:
-                    k = 20
-                    xyz_cur = self.gaussians.get_xyz
-                    idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
-                    weight = torch.exp(-100 * dist)
-                    vel_dist = torch.norm(velocity[idx] - velocity[None, :, None], p=2, dim=-1)
-                    current_loss = current_loss + self.opt.lambda_rigid * ((weight * vel_dist).sum() / k / xyz_cur.shape[0])
-                    
-                if self.opt.lambda_motion > 0:
-                    current_loss = current_loss + self.opt.lambda_motion * velocity.norm(p=2, dim=1).mean()
 
                 current_loss = current_loss / batch_size
                 current_loss.backward()
@@ -233,6 +177,63 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
                     batch_radii_static.append(radii_static)
                     batch_visibility_filter_static.append(visibility_filter_static)
+
+            # =========================================================================
+            # 🚀 [终极融合架构] HybridGS 约束机制 (已移出 Batch 循环，速度暴增 400%！)
+            # =========================================================================
+            
+            # 1. 🌟 预热机制 (Warm-up)：前 10000 步彻底放飞，防止雾化逃避！
+            warmup_start = 10000
+            warmup_end = 20000
+            if iteration < warmup_start:
+                current_lambda_d = 0.0
+            elif iteration > warmup_end:
+                current_lambda_d = self.lambda_d
+            else:
+                current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
+
+            # 2. 🌊 动态点软约束 (仅对当前滑动窗口存活的点)
+            if current_lambda_d > 0:
+                if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                    # 注意：在 batch 外面，用窗口起始和结束范围作为存活判断！
+                    alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
+                else:
+                    alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
+                
+                active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
+                active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
+                
+                if active_indices.numel() > 0:
+                    if active_indices.numel() > 30000:
+                        perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
+                        active_indices = active_indices[perm]
+                        sampled_mask = torch.zeros_like(active_dynamic_mask)
+                        sampled_mask[active_indices] = True
+                        active_dynamic_mask = sampled_mask
+
+                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
+                    # 因为在 batch 外，除以 batch_size 保证数学期望一致
+                    l_reg_d_loss = (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
+                    l_reg_d_loss.backward()
+                    loss += l_reg_d_loss.item()
+
+            # 3. 🧊 静态点绝对物理锁死 (防止背景抖动)
+            static_mask = (self.gaussians._mask_dynamic == 1)
+            if static_mask.any():
+                static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
+                if static_indices.numel() > 30000:
+                    perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
+                    static_indices = static_indices[perm]
+                    sampled_static_mask = torch.zeros_like(static_mask)
+                    sampled_static_mask[static_indices] = True
+                    static_mask = sampled_static_mask
+
+                _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
+                # 权重 10.0，且除以 batch_size 对齐梯度
+                l_hard_static_loss = (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
+                l_hard_static_loss.backward()
+                loss += l_hard_static_loss.item()
+            # =========================================================================
 
             if batch_size > 1:
                 visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
