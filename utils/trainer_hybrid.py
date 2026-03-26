@@ -143,7 +143,11 @@ class TrainerHybrid(TrainerSWinGS):
                 gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
-                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
+                # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
+                # 🚀 替换为带有防御掩码的终极版：
+                active_mask = self._get_active_dynamic_mask(frame_id)
+                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
+
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 alpha = render_pkg["alpha"]
                 
@@ -184,6 +188,26 @@ class TrainerHybrid(TrainerSWinGS):
                     l_reg_d = self.lambda_d * velocity.norm(p=2, dim=1).mean()
                     current_loss += l_reg_d
                 # ====================================================================
+                # =============== [新增] 静态点绝对物理锁死机制 ===============
+                static_mask = (self.gaussians._mask_dynamic == 1)
+                if static_mask.any():
+                    static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
+                    # 蒙特卡洛随机抽样，防止显存溢出
+                    if static_indices.numel() > 30000:
+                        perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
+                        static_indices = static_indices[perm]
+                        sampled_static_mask = torch.zeros_like(static_mask)
+                        sampled_static_mask[static_indices] = True
+                        static_mask = sampled_static_mask
+
+                    # 让静态点也过一遍 MLP，提取它们被 MLP 赋予的速度
+                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
+                    
+                    # 🚀 施加极其严厉的 L2 惩罚 (权重高达 10.0)！
+                    # 逼迫优化器和 MLP 彻底学乖，绝对不准移动背景点半毫米！
+                    l_hard_static = 10.0 * static_velocity.norm(p=2, dim=1).mean()
+                    current_loss += l_hard_static
+                # =========================================================
 
                 if self.opt.lambda_rigid > 0:
                     k = 20
@@ -248,7 +272,7 @@ class TrainerHybrid(TrainerSWinGS):
                      self.robust_hard_constraint_classifier()
                 # ====================================================================
 
-                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + self.gaussians.get_static_xyz.shape[0] if static else 0) < self.opt.densify_until_num_points):
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if static:
                         self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])

@@ -49,12 +49,12 @@ OptimizationParams:
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
   densification_interval: 100 
-  opacity_reset_interval: 700000
+  opacity_reset_interval: 7000
   densify_from_iter: 500 
-  densify_until_iter: 70000
-  densify_grad_threshold: 0.0002
+  densify_until_iter: 3000
+  densify_grad_threshold: 0.00005
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 4000000
+  densify_until_num_points: 3800000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0

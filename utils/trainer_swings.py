@@ -255,7 +255,7 @@ class TrainerSWinGS(Trainer4DGS):
 
             # =============== 致密化与优化器 ===============
             with torch.no_grad():
-                if iteration < self.opt.densify_until_iter and self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0]:
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or self.gaussians.get_xyz.shape[0] < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
