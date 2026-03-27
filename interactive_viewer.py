@@ -134,7 +134,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             btn_play = server.gui.add_button("▶️ 播放")
             btn_pause = server.gui.add_button("⏸ 暂停")
 
-        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
+        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 1, 0)
         slider_speed = server.gui.add_slider("⚡ 播放速度倍率", 0.25, 2.0, 0.05, 1.0)
         gui_res_scale = server.gui.add_slider("🖥️ 渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
 
@@ -153,9 +153,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     last_update_time = time.time()
     TARGET_FPS = 30.0
 
-    # ==========================
-    # 主循环
-    # ==========================
     while True:
         current_time = time.time()
         dt = current_time - last_update_time
@@ -173,80 +170,55 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         for client in server.get_clients().values():
             
             scale = gui_res_scale.value
-            render_w = int(selected_cam.image_width * scale)
-            render_h = int(selected_cam.image_height * scale)
-
+            native_w = selected_cam.image_width
+            native_h = selected_cam.image_height
+            render_w = int(native_w * scale)
+            render_h = int(native_h * scale)
+            
             view_cam = ProxyCam(selected_cam)
             view_cam.override_w = render_w
             view_cam.override_h = render_h
 
-            # ==========================
-            # 相机控制
-            # ==========================
             if not gui_free_roam.value:
-                c2w = get_c2w(selected_cam)
-                client.camera.position = c2w[:3, 3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
+                # 导播模式
+                c2w_gl = get_c2w(selected_cam)
+                client.camera.position = c2w_gl[:3, 3]
+                client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
             else:
+                # 自由漫游模式
                 cam_state = client.camera
-                c2w = np.eye(4)
-                c2w[:3,:3] = tf.SO3(cam_state.wxyz).as_matrix()
-                c2w[:3,3] = cam_state.position
-                c2w[:,1:3] *= -1
-                w2c = np.linalg.inv(c2w)
-
-                R = w2c[:3,:3].T
-                T = w2c[:3,3]
-
-                wvt = torch.tensor(getWorld2View2(R,T,np.zeros(3),1.0),
-                                   dtype=torch.float32).transpose(0,1).cuda()
-
-                proj = getProjectionMatrix(
-                    znear=0.01, zfar=100,
-                    fovX=selected_cam.FoVx,
-                    fovY=selected_cam.FoVy
-                ).transpose(0,1).cuda()
-
+                c2w_gl = np.eye(4)
+                c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
+                c2w_gl[:3, 3] = cam_state.position
+                
+                # GL 完美转 CV
+                c2w_cv = c2w_gl.copy()
+                c2w_cv[:, 1:3] *= -1
+                w2c_cv = np.linalg.inv(c2w_cv)
+                
+                R = w2c_cv[:3, :3].T
+                T = w2c_cv[:3, 3]
+                
+                wvt = torch.tensor(getWorld2View2(R, T, np.array([0.,0.,0.]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
+                
+                # 锁定 FOV 防止拉伸畸变
+                fovx = selected_cam.FoVx
+                fovy = selected_cam.FoVy
+                proj = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+                
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
-                view_cam.override_full = wvt @ proj
-                view_cam.override_center = wvt.inverse()[3,:3]
+                view_cam.override_full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
+                view_cam.override_center = wvt.inverse()[3, :3]
+                view_cam.override_fovx = fovx
+                view_cam.override_fovy = fovy
 
-            # # ==========================
-            # # ⭐ 4D 时间控制（关键）
-            # # ==========================
-            # if hasattr(gaussians, '_t') and gaussians._t is not None:
-            #     gaussians._t.data.fill_(frame_idx / max_frames)
-
-            # # ==========================
-            # # ⭐ 生命周期过滤（SWinGS / Hybrid）
-            # # ==========================
-            # active_mask = None
-            # if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-            #     active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
-
-            #     if hasattr(gaussians, '_mask_dynamic'):
-            #         active_mask = (gaussians._mask_dynamic == 1) | (
-            #             (gaussians._mask_dynamic != 1) & active_mask
-            #         )
-
-            # ==========================
-            # 🚀 原生渲染（核心）
-            # ==========================
-            out = render(
-                view_cam,
-                gaussians,
-                pipe,
-                background
-                # active_dynamic_mask=active_mask
-            )
-
+            # 底层高清渲染
+            out = render(view_cam, gaussians, pipe, background)
             img = torch.clamp(out["render"], 0, 1)
             img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-            # ==========================
-            # ⭐ 关键：防拉伸 + 固定分辨率显示
-            # ==========================
+            # 自适应防拉伸填缝
             browser_aspect = client.camera.aspect
             render_aspect = render_w / render_h
 
@@ -258,20 +230,14 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 canvas_h = int(render_w / browser_aspect)
 
             canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-
             y0 = (canvas_h - render_h) // 2
             x0 = (canvas_w - render_w) // 2
-
             canvas[y0:y0+render_h, x0:x0+render_w] = img_np
 
             client.scene.set_background_image(canvas, format="png")
 
         time.sleep(0.01)
 
-
-# ==============================
-# 启动
-# ==============================
 if __name__ == "__main__":
     parser = ArgumentParser()
 
@@ -279,7 +245,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
 
     parser.add_argument("--config", required=True)
-    parser.add_argument("--start_checkpoint", type=str)
+    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
 
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5,0.5])
