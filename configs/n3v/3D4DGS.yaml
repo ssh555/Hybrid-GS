@@ -54,7 +54,7 @@ OptimizationParams:
   densify_until_iter: 45000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 4000000
+  densify_until_num_points: 2000000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
