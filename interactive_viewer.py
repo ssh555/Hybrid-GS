@@ -187,29 +187,40 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             else:
                 # 自由漫游模式
                 cam_state = client.camera
-                c2w_gl = np.eye(4)
+                
+                # 【第一步：建立 OpenGL 规范的 C2W】
+                c2w_gl = np.eye(4, dtype=np.float32)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
                 
-                # GL 完美转 CV
+                # 【第二步：转换至 OpenCV 规范】
+                # 翻转相机的局部 Y 轴和 Z 轴
                 c2w_cv = c2w_gl.copy()
-                c2w_cv[:, 1:3] *= -1
+                c2w_cv[:, 1:3] *= -1 
+                
+                # 【第三步：求逆获得 W2C】
                 w2c_cv = np.linalg.inv(c2w_cv)
                 
-                R = w2c_cv[:3, :3].T
-                T = w2c_cv[:3, 3]
+                # 【第四步：构造 CUDA Column-Major 的 world_view_transform】
+                wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
                 
-                wvt = torch.tensor(getWorld2View2(R, T, np.array([0.,0.,0.]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
+                # 【第五步：动态解算交互相机的真实 FOV (杜绝拉伸畸变)】
+                fovy = cam_state.fov
+                aspect = render_w / render_h
+                fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * aspect)
                 
-                # 锁定 FOV 防止拉伸畸变
-                fovx = selected_cam.FoVx
-                fovy = selected_cam.FoVy
+                # 构造投影矩阵并转置以适配 CUDA
                 proj = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
                 
+                # 【第六步：合成渲染管线所需的全部核心参数】
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
-                view_cam.override_full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
-                view_cam.override_center = wvt.inverse()[3, :3]
+                # 注意：PyTorch 的 matmul 等价于矩阵乘法。由于 WVT 和 PROJ 均已转置
+                # 所以相乘顺序直接是 WVT @ PROJ 即可，这与 3DGS 底层的 bmm 逻辑完全等价
+                view_cam.override_full = wvt.matmul(proj) 
+                
+                # 最精妙的一步：直接从 OpenCV 的 C2W 矩阵提取相机中心，彻底消除逆矩阵推算产生的浮点数漂移
+                view_cam.override_center = torch.tensor(c2w_cv[:3, 3], dtype=torch.float32, device="cuda") 
                 view_cam.override_fovx = fovx
                 view_cam.override_fovy = fovy
 
