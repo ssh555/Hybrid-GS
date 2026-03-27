@@ -124,6 +124,10 @@ class OptimizationParams(ParamGroup):
         self.tau_max = 0.05         # HybridGS 硬约束: 最大瞬时位移阈值
         self.lambda_d = 0.1         # HybridGS 软约束: 位移收敛正则化惩罚系数
 
+        self.use_soft_constraint = True
+        self.use_hard_constraint = True
+        self.use_mc_sampling = True
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

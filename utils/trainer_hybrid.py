@@ -273,28 +273,42 @@ class TrainerHybrid(TrainerSWinGS):
                 if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
                      self.robust_hard_constraint_classifier()
                 # ====================================================================
-
-                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
+                if iteration < self.opt.densify_until_iter:
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    if static:
-                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
                     
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
                     else:
                         self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
-                        if static:
-                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
 
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            
+                            # 🚀 动态阈值法：让系统“只排泄，不进食”
+                            active_grad_threshold = self.opt.densify_grad_threshold
+                            active_grad_t_threshold = getattr(self.opt, 'densify_grad_t_threshold', 0.00005)
+                            
+                            # 触顶防爆：如果点数超过上限，把生点门槛拉到极其巨大 (99999.0)
+                            # 这样它绝对生不出新点，但底层的 prune (修剪) 依然会完美执行，清理显存！
+                            try:
+                                num_static = self.gaussians.get_static_xyz.shape[0] if (hasattr(self.gaussians, 'get_static_xyz') and self.gaussians.get_static_xyz is not None) else 0
+                            except:
+                                num_static = 0
+                            current_pts = self.gaussians.get_xyz.shape[0] + num_static
+                            max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
+                            if max_points > 0 and current_pts >= max_points:
+                                active_grad_threshold = 99999.0 
+                                active_grad_t_threshold = 99999.0 
+
+                            self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, active_grad_t_threshold)
+                            
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
-                    if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
-                        self.gaussians.reset_opacity()
+                # 大扫除独立出来
+                if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                    self.gaussians.reset_opacity()
                         
                 if iteration < self.opt.iterations:
                     # SWinGS 生命周期衰减
