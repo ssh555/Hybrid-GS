@@ -184,9 +184,10 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             # 相机控制
             # ==========================
             if not gui_free_roam.value:
-                c2w = get_c2w(selected_cam)
-                client.camera.position = c2w[:3, 3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
+                view_cam = selected_cam
+                # c2w = get_c2w(selected_cam)
+                # client.camera.position = c2w[:3, 3]
+                # client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
             else:
                 cam_state = client.camera
                 c2w = np.eye(4)
