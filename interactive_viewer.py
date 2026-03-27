@@ -184,10 +184,9 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             # 相机控制
             # ==========================
             if not gui_free_roam.value:
-                view_cam = selected_cam
-                # c2w = get_c2w(selected_cam)
-                # client.camera.position = c2w[:3, 3]
-                # client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
+                c2w = get_c2w(selected_cam)
+                client.camera.position = c2w[:3, 3]
+                client.camera.wxyz = tf.SO3.from_matrix(c2w[:3, :3]).wxyz
             else:
                 cam_state = client.camera
                 c2w = np.eye(4)
@@ -213,23 +212,23 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam.override_full = wvt @ proj
                 view_cam.override_center = wvt.inverse()[3,:3]
 
-            # ==========================
-            # ⭐ 4D 时间控制（关键）
-            # ==========================
-            if hasattr(gaussians, '_t') and gaussians._t is not None:
-                gaussians._t.data.fill_(frame_idx / max_frames)
+            # # ==========================
+            # # ⭐ 4D 时间控制（关键）
+            # # ==========================
+            # if hasattr(gaussians, '_t') and gaussians._t is not None:
+            #     gaussians._t.data.fill_(frame_idx / max_frames)
 
-            # ==========================
-            # ⭐ 生命周期过滤（SWinGS / Hybrid）
-            # ==========================
-            active_mask = None
-            if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
+            # # ==========================
+            # # ⭐ 生命周期过滤（SWinGS / Hybrid）
+            # # ==========================
+            # active_mask = None
+            # if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
+            #     active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
 
-                if hasattr(gaussians, '_mask_dynamic'):
-                    active_mask = (gaussians._mask_dynamic == 1) | (
-                        (gaussians._mask_dynamic != 1) & active_mask
-                    )
+            #     if hasattr(gaussians, '_mask_dynamic'):
+            #         active_mask = (gaussians._mask_dynamic == 1) | (
+            #             (gaussians._mask_dynamic != 1) & active_mask
+            #         )
 
             # ==========================
             # 🚀 原生渲染（核心）
@@ -238,8 +237,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam,
                 gaussians,
                 pipe,
-                background,
-                active_dynamic_mask=active_mask
+                background
+                # active_dynamic_mask=active_mask
             )
 
             img = torch.clamp(out["render"], 0, 1)
