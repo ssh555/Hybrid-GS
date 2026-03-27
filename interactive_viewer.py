@@ -187,31 +187,37 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             else:
                 # 自由漫游模式
                 cam_state = client.camera
+
+                # 1️⃣ 直接构造 OpenGL c2w
                 c2w_gl = np.eye(4)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
-                
-                # GL 完美转 CV
+
+                # 2️⃣ 一次性 GL → CV（只做一次！！！）
                 c2w_cv = c2w_gl.copy()
                 c2w_cv[:, 1:3] *= -1
+
+                # 3️⃣ 求 w2c（关键）
                 w2c_cv = np.linalg.inv(c2w_cv)
-                
-                R = w2c_cv[:3, :3].T
-                T = w2c_cv[:3, 3]
-                
-                wvt = torch.tensor(getWorld2View2(R, T, np.array([0.,0.,0.]), 1.0), dtype=torch.float32).transpose(0, 1).cuda()
-                
-                # 锁定 FOV 防止拉伸畸变
-                fovx = selected_cam.FoVx
-                fovy = selected_cam.FoVy
-                proj = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
-                
+
+                # 4️⃣ 直接构造 world_view_transform（⚠️不要再拆 R/T）
+                wvt = torch.tensor(w2c_cv, dtype=torch.float32).transpose(0, 1).cuda()
+
+                # 5️⃣ projection（用训练FOV）
+                proj = getProjectionMatrix(
+                    znear=0.01,
+                    zfar=100.0,
+                    fovX=selected_cam.FoVx,
+                    fovY=selected_cam.FoVy
+                ).transpose(0, 1).cuda()
+
+                # 6️⃣ 填充
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
-                view_cam.override_full = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
-                view_cam.override_center = wvt.inverse()[3, :3]
-                view_cam.override_fovx = fovx
-                view_cam.override_fovy = fovy
+                view_cam.override_full = wvt @ proj
+                view_cam.override_center = torch.tensor(c2w_cv[:3, 3], device="cuda")
+                view_cam.override_fovx = selected_cam.FoVx
+                view_cam.override_fovy = selected_cam.FoVy
 
             # 底层高清渲染
             out = render(view_cam, gaussians, pipe, background)
