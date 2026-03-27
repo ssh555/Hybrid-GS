@@ -134,7 +134,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             btn_play = server.gui.add_button("▶️ 播放")
             btn_pause = server.gui.add_button("⏸ 暂停")
 
-        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 1, 0)
+        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
         slider_speed = server.gui.add_slider("⚡ 播放速度倍率", 0.25, 2.0, 0.05, 1.0)
         gui_res_scale = server.gui.add_slider("🖥️ 渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
 
