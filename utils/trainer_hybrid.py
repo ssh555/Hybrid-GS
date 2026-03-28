@@ -136,24 +136,12 @@ class TrainerHybrid(TrainerSWinGS):
                 # 🚀 动态缓存读取机制
                 # ===================================================
                 if dataset_idx not in self.window_cache:
-                    # 第一次从硬盘/内存读取
-                    raw_img, raw_cam = training_dataset[dataset_idx]
-                    
-                    # 🚀 极致优化：直接将张量转移到 GPU 并缓存！
-                    # 使用 non_blocking=True 开启异步传输，不阻塞主线程
-                    gpu_img = raw_img.cuda(non_blocking=True)
-                    
-                    # 注意：3DGS 的 Camera 类可能没有完整的 .cuda() 方法，
-                    # 但我们通常只需要它的 image_name, FoVx 等属性，或者原作者已经处理好了
-                    try:
-                        gpu_cam = raw_cam.cuda()
-                    except AttributeError:
-                        gpu_cam = raw_cam  # 如果不支持 cuda() 就不强求，主要是图片耗时
-                        
-                    self.window_cache[dataset_idx] = (gpu_img, gpu_cam)
-
-                # 🚀 光速读取：直接从显存字典里拿出来用，没有任何搬运开销！
+                    # 如果内存里没有（新进窗口的帧），就去硬盘读一次，并存入缓存
+                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
+                
+                # 从内存中光速读取！
                 gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
                 # 🚀 替换为带有防御掩码的终极版：
