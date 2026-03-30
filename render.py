@@ -37,7 +37,7 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
     print(f"[渲染器] 数据集共有 {len(train_cameras)} 个样本。正在智能聚类单视角...")
     
     # 我们以第 1 个相机的空间位置为基准 (View 0)
-    base_cam = train_cameras[0]
+    base_cam = train_cameras[int(len(train_cameras) / 2)]
     base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
     base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R # [新增] 获取基准相机的旋转矩阵
     

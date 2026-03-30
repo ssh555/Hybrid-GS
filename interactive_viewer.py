@@ -173,7 +173,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
             if not gui_free_roam.value:
                 # ==========================================================
-                # 🎬 导播模式：绝对忠于原数据集 (保留黑边填缝)
+                # 🎬 导播模式：利用黑边防畸变，完美呈现过拟合的 2D 纸片视角
                 # ==========================================================
                 render_w = int(selected_cam.image_width * scale)
                 render_h = int(selected_cam.image_height * scale)
@@ -182,17 +182,14 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam.override_w = render_w
                 view_cam.override_h = render_h
                 
-                # 同步 Viser 相机位姿 (仅作视觉反馈)
                 c2w_gl = get_c2w(selected_cam)
                 client.camera.position = c2w_gl[:3, 3]
                 client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
 
-                # 渲染
                 out = render(view_cam, gaussians, pipe, background)
                 img = torch.clamp(out["render"], 0, 1)
                 img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-                # 导播模式专属：防拉伸填缝
                 render_aspect = render_w / render_h
                 if browser_aspect > render_aspect:
                     canvas_h = render_h
@@ -210,57 +207,45 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
             else:
                 # ==========================================================
-                # 🕹️ 自由漫游模式：完全贴合浏览器 (消灭雅可比畸变！)
+                # 🕹️ 自由漫游模式：对标 gsplat 的纯净矩阵推导
                 # ==========================================================
                 cam_state = client.camera
                 
-                # 🌟 核心修复 1：动态渲染分辨率！
-                # 以原图高度为基准，宽度由浏览器宽高比强行计算得出，彻底消灭黑边！
                 base_h = selected_cam.image_height * scale
                 render_h = int(base_h)
                 render_w = int(base_h * browser_aspect)
-                
-                view_cam = ProxyCam(selected_cam)
-                view_cam.override_w = render_w
-                view_cam.override_h = render_h
 
-                # 1. 获取 Viser C2W
+                # 1. 获取 Viser OpenGL 坐标系
                 c2w_gl = np.eye(4, dtype=np.float32)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
 
-                # 2. 转换为 3DGS (OpenCV) 规范的 C2W
+                # 2. 转换为 3DGS OpenCV 坐标系
                 c2w_cv = c2w_gl.copy()
                 c2w_cv[:, 1:3] *= -1 
 
-                # 3. 🌟 核心修复 2：手工精准求逆获取 W2C，杜绝矩阵奇点漂移！
-                R_cv = c2w_cv[:3, :3]
-                T_cv = c2w_cv[:3, 3]
-                w2c_cv = np.eye(4, dtype=np.float32)
-                w2c_cv[:3, :3] = R_cv.T
-                w2c_cv[:3, 3] = -R_cv.T @ T_cv
-
+                # 3. 标准求逆获得 W2C
+                w2c_cv = np.linalg.inv(c2w_cv)
+                
+                # 4. 转换为 CUDA Column-Major 布局
                 wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
 
-                # 4. 🌟 核心修复 3：精准咬合的 FOV 计算
                 fovy = cam_state.fov
                 fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * browser_aspect)
+                
+                # 🛡️ 防御措施：稍微提高 znear 到 0.1，减轻长矛穿模爆屏的视觉污染
+                proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
 
-                # 5. 安全的投影矩阵 (继承防爆 znear)
-                znear = getattr(selected_cam, 'znear', 0.01)
-                zfar = getattr(selected_cam, 'zfar', 100.0)
-                proj = getProjectionMatrix(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
-
-                # 6. 全量参数装配
+                view_cam = ProxyCam(selected_cam)
+                view_cam.override_w = render_w
+                view_cam.override_h = render_h
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
                 view_cam.override_full = wvt.matmul(proj)
-                # 精确传入 Viser 真实的相机中心，消除 SH 颜色异常！
-                view_cam.override_center = torch.tensor(cam_state.position, dtype=torch.float32, device="cuda")
+                view_cam.override_center = torch.tensor(c2w_cv[:3, 3], dtype=torch.float32, device="cuda")
                 view_cam.override_fovx = fovx
                 view_cam.override_fovy = fovy
 
-                # 渲染：此时分辨率与浏览器完美一致，无需任何黑边处理！
                 out = render(view_cam, gaussians, pipe, background)
                 img = torch.clamp(out["render"], 0, 1)
                 img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
