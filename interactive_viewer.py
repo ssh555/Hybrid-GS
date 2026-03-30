@@ -38,6 +38,7 @@ class RenderCam:
         self.cy = self.image_height / 2.0
         self.fl_x = self.cx / math.tan(self.FoVx / 2.0)
         self.fl_y = self.cy / math.tan(self.FoVy / 2.0)
+        
     def get_rays(self):
         """
         原生重写射线生成逻辑，使用当前 RenderCam 自身的物理属性，
@@ -234,8 +235,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam.FoVy = fovy
                 view_cam.world_view_transform = wvt
                 view_cam.projection_matrix = proj
-                view_cam.full_proj_transform = wvt.matmul(proj)
-                view_cam.camera_center = torch.tensor(c2w_cv[:3, 3], dtype=torch.float32, device="cuda")
+                view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
+                view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
                 active_mask = None
                 if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
                     frame_id = int(slider_frame.value)
