@@ -227,21 +227,59 @@ class TrainerSWinGS(Trainer4DGS):
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
                     
-                # Rigid Loss
-                if self.opt.lambda_rigid > 0:
-                    k = 20
-                    xyz_cur = self.gaussians.get_xyz
-                    idx, dist = knn(xyz_cur[None].contiguous().detach(), xyz_cur[None].contiguous().detach(), k)
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
-                    weight = torch.exp(-100 * dist)
-                    vel_dist = torch.norm(velocity[idx] - velocity[None, :, None], p=2, dim=-1)
-                    current_loss = current_loss + self.opt.lambda_rigid * ((weight * vel_dist).sum() / k / xyz_cur.shape[0])
-                    
-                # Motion Loss
-                if self.opt.lambda_motion > 0:
-                    _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 0.1)
-                    current_loss = current_loss + self.opt.lambda_motion * velocity.norm(p=2, dim=1).mean()
 
+                    
+                need_velocity = (self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)
+                
+                if need_velocity:
+                    current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+                    
+                    # ⚠️ 核心提速：只给当前活着的点算速度 (MLP 唯一一次前向传播)
+                    _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_mask)
+                    
+                    # --- 1. Rigid Loss (KNN 刚性防炸裂约束) ---
+                    if self.opt.lambda_rigid > 0:
+                        k_neighbors = 10
+                        xyz_active = self.gaussians.get_xyz[active_mask].contiguous()
+                        
+                        # 绝对防爆机制：强制最多只随机抽 30,000 个点算 KNN！
+                        if xyz_active.shape[0] > 30000:
+                            perm = torch.randperm(xyz_active.shape[0], device="cuda")[:30000]
+                            xyz_cur = xyz_active[perm].contiguous()
+                            velocity_cur = active_velocity[perm]
+                        else:
+                            xyz_cur = xyz_active
+                            velocity_cur = active_velocity
+
+                        # 防止点数太少导致 KNN 报错
+                        if xyz_cur.shape[0] > k_neighbors:
+                            idx, dist = knn(xyz_cur[None].detach(), xyz_cur[None].detach(), k_neighbors)
+                            weight = torch.exp(-100 * dist)
+                            vel_dist = torch.norm(velocity_cur[idx.squeeze(0)] - velocity_cur.unsqueeze(1), p=2, dim=-1)
+                            coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_cur.shape[0]
+                            current_loss = current_loss + (self.opt.lambda_rigid * 5.0) * coherence_loss
+                    
+                if self.opt.lambda_motion > 0:
+                    current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+                    
+                    # 💡 极限提速核心：无论当前窗口有多少活着的点，最多只抽 10,000 个算速度！
+                    active_indices = torch.nonzero(active_mask, as_tuple=False).squeeze()
+                    
+                    if active_indices.numel() > 10000:
+                        perm = torch.randperm(active_indices.numel(), device="cuda")[:10000]
+                        sampled_indices = active_indices[perm]
+                        sampled_mask = torch.zeros_like(active_mask)
+                        sampled_mask[sampled_indices] = True
+                    else:
+                        sampled_mask = active_mask
+
+                    # MLP 唯一一次前向传播，且最多只算 1 万个点！耗时极其微小！
+                    _, sampled_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=sampled_mask)
+                    
+                    # 惩罚拉扯，防碎纸屑
+                    current_loss = current_loss + (self.opt.lambda_motion * 2.0) * sampled_velocity.norm(p=2, dim=1).mean()
+
+                # =============== 统一回传 =================
                 current_loss = current_loss / batch_size
                 current_loss.backward()
                 loss += current_loss.item()

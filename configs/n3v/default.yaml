@@ -9,7 +9,7 @@ exhaust_test: False
 start_checkpoint: "output/3d4dgs/miku_shaungxue_daxi/test_short_20/chkpnt_6000.pth"
 
 ModelParams:
-  sh_degree: 3
+  sh_degree: 2
   source_path: "./datasets/miku_shaungxue_daxi/test_short_20"
   model_path: "output/3d4dgs/miku_shaungxue_daxi/test_short_20"
   images: "images"

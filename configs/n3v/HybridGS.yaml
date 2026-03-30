@@ -6,10 +6,10 @@ rot_4d: True
 force_sh_3d: True
 batch_size: 4
 exhaust_test: False
-start_checkpoint: "output/hybrid_gs/miku_shaungxue_daxi/test_short/chkpnt_70000.pth" # 2901*20 迭代25w,增值25w，80滑动窗口，最多400w点
+start_checkpoint: "output/hybrid_gs/miku_shaungxue_daxi/test_short/chkpnt_40000.pth" # 2901*20 迭代25w,增值25w，80滑动窗口，最多400w点
 
 ModelParams:
-  sh_degree: 3
+  sh_degree: 2
   source_path: "./datasets/miku_shaungxue_daxi/test_short"
   model_path: "output/hybrid_gs/miku_shaungxue_daxi/test_short"
   images: "images"
@@ -35,38 +35,38 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 70000
+  iterations: 40000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30000
+  position_lr_max_steps: 40000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
-  thresh_opa_prune: 0.005
+  thresh_opa_prune: 0.01
   densification_interval: 100 
   opacity_reset_interval: 7000000
   densify_from_iter: 500 
-  densify_until_iter: 70000
-  densify_grad_threshold: 0.0002
+  densify_until_iter: 30000
+  densify_grad_threshold: 0.0004
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: 2000000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
-  lambda_motion: 0.0
+  lambda_motion: 0.5
   
   # ==========================================================
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
-  tau_max: 0.05             # HybridGS 硬约束：最大瞬时位移阈值
+  tau_avg: 0.05             # HybridGS 硬约束：平均位移阈值
+  tau_max: 0.15             # HybridGS 硬约束：最大瞬时位移阈值
   lambda_d: 0.05             # HybridGS 软约束：位移收敛正则化系数
   # ==========================================================
   # [毕设专属] 消融实验控制开关 (Ablation Switches)

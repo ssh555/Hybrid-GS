@@ -168,84 +168,104 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
 
         for client in server.get_clients().values():
-            
             scale = gui_res_scale.value
-            native_w = selected_cam.image_width
-            native_h = selected_cam.image_height
-            render_w = int(native_w * scale)
-            render_h = int(native_h * scale)
-            
-            view_cam = ProxyCam(selected_cam)
-            view_cam.override_w = render_w
-            view_cam.override_h = render_h
+            browser_aspect = client.camera.aspect
 
             if not gui_free_roam.value:
-                # 导播模式
+                # ==========================================================
+                # 🎬 导播模式：绝对忠于原数据集 (保留黑边填缝)
+                # ==========================================================
+                render_w = int(selected_cam.image_width * scale)
+                render_h = int(selected_cam.image_height * scale)
+                
+                view_cam = ProxyCam(selected_cam)
+                view_cam.override_w = render_w
+                view_cam.override_h = render_h
+                
+                # 同步 Viser 相机位姿 (仅作视觉反馈)
                 c2w_gl = get_c2w(selected_cam)
                 client.camera.position = c2w_gl[:3, 3]
                 client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
+
+                # 渲染
+                out = render(view_cam, gaussians, pipe, background)
+                img = torch.clamp(out["render"], 0, 1)
+                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+
+                # 导播模式专属：防拉伸填缝
+                render_aspect = render_w / render_h
+                if browser_aspect > render_aspect:
+                    canvas_h = render_h
+                    canvas_w = int(render_h * browser_aspect)
+                else:
+                    canvas_w = render_w
+                    canvas_h = int(render_w / browser_aspect)
+
+                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+                y0 = (canvas_h - render_h) // 2
+                x0 = (canvas_w - render_w) // 2
+                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
+
+                client.scene.set_background_image(canvas, format="png")
+
             else:
-                # 自由漫游模式
+                # ==========================================================
+                # 🕹️ 自由漫游模式：完全贴合浏览器 (消灭雅可比畸变！)
+                # ==========================================================
                 cam_state = client.camera
                 
-                # 【第一步：建立 OpenGL 规范的 C2W】
+                # 🌟 核心修复 1：动态渲染分辨率！
+                # 以原图高度为基准，宽度由浏览器宽高比强行计算得出，彻底消灭黑边！
+                base_h = selected_cam.image_height * scale
+                render_h = int(base_h)
+                render_w = int(base_h * browser_aspect)
+                
+                view_cam = ProxyCam(selected_cam)
+                view_cam.override_w = render_w
+                view_cam.override_h = render_h
+
+                # 1. 获取 Viser C2W
                 c2w_gl = np.eye(4, dtype=np.float32)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
-                
-                # 【第二步：转换至 OpenCV 规范】
-                # 翻转相机的局部 Y 轴和 Z 轴
+
+                # 2. 转换为 3DGS (OpenCV) 规范的 C2W
                 c2w_cv = c2w_gl.copy()
                 c2w_cv[:, 1:3] *= -1 
-                
-                # 【第三步：求逆获得 W2C】
-                w2c_cv = np.linalg.inv(c2w_cv)
-                
-                # 【第四步：构造 CUDA Column-Major 的 world_view_transform】
+
+                # 3. 🌟 核心修复 2：手工精准求逆获取 W2C，杜绝矩阵奇点漂移！
+                R_cv = c2w_cv[:3, :3]
+                T_cv = c2w_cv[:3, 3]
+                w2c_cv = np.eye(4, dtype=np.float32)
+                w2c_cv[:3, :3] = R_cv.T
+                w2c_cv[:3, 3] = -R_cv.T @ T_cv
+
                 wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
-                
-                # 【第五步：动态解算交互相机的真实 FOV (杜绝拉伸畸变)】
+
+                # 4. 🌟 核心修复 3：精准咬合的 FOV 计算
                 fovy = cam_state.fov
-                aspect = render_w / render_h
-                fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * aspect)
-                
-                # 构造投影矩阵并转置以适配 CUDA
-                proj = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
-                
-                # 【第六步：合成渲染管线所需的全部核心参数】
+                fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * browser_aspect)
+
+                # 5. 安全的投影矩阵 (继承防爆 znear)
+                znear = getattr(selected_cam, 'znear', 0.01)
+                zfar = getattr(selected_cam, 'zfar', 100.0)
+                proj = getProjectionMatrix(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+
+                # 6. 全量参数装配
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
-                # 注意：PyTorch 的 matmul 等价于矩阵乘法。由于 WVT 和 PROJ 均已转置
-                # 所以相乘顺序直接是 WVT @ PROJ 即可，这与 3DGS 底层的 bmm 逻辑完全等价
-                view_cam.override_full = wvt.matmul(proj) 
-                
-                # 最精妙的一步：直接从 OpenCV 的 C2W 矩阵提取相机中心，彻底消除逆矩阵推算产生的浮点数漂移
-                view_cam.override_center = torch.tensor(c2w_cv[:3, 3], dtype=torch.float32, device="cuda") 
+                view_cam.override_full = wvt.matmul(proj)
+                # 精确传入 Viser 真实的相机中心，消除 SH 颜色异常！
+                view_cam.override_center = torch.tensor(cam_state.position, dtype=torch.float32, device="cuda")
                 view_cam.override_fovx = fovx
                 view_cam.override_fovy = fovy
 
-            # 底层高清渲染
-            out = render(view_cam, gaussians, pipe, background)
-            img = torch.clamp(out["render"], 0, 1)
-            img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                # 渲染：此时分辨率与浏览器完美一致，无需任何黑边处理！
+                out = render(view_cam, gaussians, pipe, background)
+                img = torch.clamp(out["render"], 0, 1)
+                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-            # 自适应防拉伸填缝
-            browser_aspect = client.camera.aspect
-            render_aspect = render_w / render_h
-
-            if browser_aspect > render_aspect:
-                canvas_h = render_h
-                canvas_w = int(render_h * browser_aspect)
-            else:
-                canvas_w = render_w
-                canvas_h = int(render_w / browser_aspect)
-
-            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-            y0 = (canvas_h - render_h) // 2
-            x0 = (canvas_w - render_w) // 2
-            canvas[y0:y0+render_h, x0:x0+render_w] = img_np
-
-            client.scene.set_background_image(canvas, format="png")
+                client.scene.set_background_image(img_np, format="png")
 
         time.sleep(0.01)
 

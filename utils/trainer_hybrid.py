@@ -195,6 +195,9 @@ class TrainerHybrid(TrainerSWinGS):
             # =========================================================================
             total_reg_loss = 0.0  # 🚀 必修修复 3：统一梯度收集池
 
+            # 🌟 核心修复 1：获取当前真实帧的时间戳！绝不能用固定值！
+            current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+
             # --- 1. 软约束模块 (用 self.use_soft 控制) ---
             if self.use_soft:
                 warmup_start, warmup_end = 10000, 20000
@@ -202,7 +205,7 @@ class TrainerHybrid(TrainerSWinGS):
                 elif iteration > warmup_end: current_lambda_d = self.lambda_d
                 else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
 
-                if current_lambda_d > 0:
+                if current_lambda_d > 0 or self.opt.lambda_rigid > 0:
                     if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                         alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
                     else:
@@ -212,36 +215,51 @@ class TrainerHybrid(TrainerSWinGS):
                     active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
                     
                     if active_indices.numel() > 0:
-                        # 🌟 蒙特卡洛空间采样消融 (用 self.use_mc 控制)
-                        if self.use_mc and active_indices.numel() > 30000:
+                        # 🌟 核心修复 2：绝对防爆机制，绝不能受 use_mc 控制！永远开启！
+                        if active_indices.numel() > 30000:
                             perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
                             active_indices = active_indices[perm]
                             sampled_mask = torch.zeros_like(active_dynamic_mask)
                             sampled_mask[active_indices] = True
                             active_dynamic_mask = sampled_mask
 
-                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
-                        l_reg_d_loss = (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
-                        total_reg_loss += l_reg_d_loss
+                        # 🌟 核心修复 3：使用 current_t 算速度防虚影！
+                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
+                        
+                        if current_lambda_d > 0:
+                            total_reg_loss += (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
+
+                        # 🌟 核心修复 4：补回丢失的 KNN 刚性约束！(防身体纸屑化)
+                        if self.opt.lambda_rigid > 0 and active_indices.numel() > 10:
+                            k_neighbors = 10
+                            xyz_dynamic = self.gaussians.get_xyz[active_dynamic_mask].contiguous()
+                            
+                            idx, dist = knn(xyz_dynamic[None].detach(), xyz_dynamic[None].detach(), k_neighbors)
+                            weight = torch.exp(-100 * dist)
+                            vel_dist = torch.norm(velocity[idx.squeeze(0)] - velocity.unsqueeze(1), p=2, dim=-1)
+                            coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
+                            
+                            total_reg_loss += (self.opt.lambda_rigid * 5.0 * coherence_loss) / batch_size
 
             # --- 2. 硬约束的静态物理锁死模块 (用 self.use_hard 控制) ---
             if self.use_hard:
                 static_mask = (self.gaussians._mask_dynamic == 1)
                 if static_mask.any():
                     static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                    # 🌟 蒙特卡洛空间采样消融
-                    if self.use_mc and static_indices.numel() > 30000:
+                    
+                    # 🌟 核心修复 5：绝对防爆机制！
+                    if static_indices.numel() > 30000:
                         perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
                         static_indices = static_indices[perm]
                         sampled_static_mask = torch.zeros_like(static_mask)
                         sampled_static_mask[static_indices] = True
                         static_mask = sampled_static_mask
 
-                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
-                    l_hard_static_loss = (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
-                    total_reg_loss += l_hard_static_loss
+                    # 🌟 核心修复 6：同样必须使用 current_t！
+                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=static_mask)
+                    total_reg_loss += (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
 
-            # 🚀 必修修复 3：统一单次 Backward，彻底解决梯度 scale 混乱！
+            # 🚀 统一单次 Backward
             if isinstance(total_reg_loss, torch.Tensor) and total_reg_loss.requires_grad:
                 total_reg_loss.backward()
                 loss += total_reg_loss.item()
