@@ -123,40 +123,16 @@ class TrainerHybrid(TrainerSWinGS):
             
             loss = 0
             for batch_idx in range(batch_size):
-                # 1. SWinGS 官方算法：在当前活跃的滑动窗口内进行均匀随机抽样 (SGD核心)
+                # 1. 窗口采样与数据读取
                 t_id = random.randint(self.window_start, self.window_end)
-                
-                # 2. 从预处理的字典中，随机抽取该帧对应的一个相机视角
-                # 这个做法 100% 避免了之前的数组越界和单视角 Bug
                 dataset_idx = random.choice(self.frames_dict[t_id])
-                
-                # 3. 提取真实图像和相机位姿
                 frame_id = t_id
-                # ===================================================
-                # 🚀 动态缓存读取机制
-                # ===================================================
+
                 if dataset_idx not in self.window_cache:
-                    # 第一次从硬盘/内存读取
-                    raw_img, raw_cam = training_dataset[dataset_idx]
-                    
-                    # 🚀 极致优化：直接将张量转移到 GPU 并缓存！
-                    # 使用 non_blocking=True 开启异步传输，不阻塞主线程
-                    gpu_img = raw_img.cuda(non_blocking=True)
-                    
-                    # 注意：3DGS 的 Camera 类可能没有完整的 .cuda() 方法，
-                    # 但我们通常只需要它的 image_name, FoVx 等属性，或者原作者已经处理好了
-                    try:
-                        gpu_cam = raw_cam.cuda()
-                    except AttributeError:
-                        gpu_cam = raw_cam  # 如果不支持 cuda() 就不强求，主要是图片耗时
-                        
-                    self.window_cache[dataset_idx] = (gpu_img, gpu_cam)
-
-                # 🚀 光速读取：直接从显存字典里拿出来用，没有任何搬运开销！
+                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
                 gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
-                # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
-                # 🚀 替换为带有防御掩码的终极版：
                 active_mask = self._get_active_dynamic_mask(frame_id)
                 render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
 
@@ -167,6 +143,7 @@ class TrainerHybrid(TrainerSWinGS):
                 visibility_filter_static = render_pkg.get("visibility_filter_static", [])
                 radii_static = render_pkg.get("radii_static", [])
 
+                # 2. 基础图像 Loss
                 Ll1 = l1_loss(image, gt_image)
                 Lssim = 1.0 - ssim(image, gt_image)
                 current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
@@ -176,10 +153,66 @@ class TrainerHybrid(TrainerSWinGS):
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
 
+                # =========================================================
+                # 3. HybridGS 软硬双重约束 (完全消融解耦，且防爆)
+                # =========================================================
+                total_reg_loss = 0.0  
+
+                # --- 软约束 ---
+                if self.use_soft:
+                    warmup_start, warmup_end = 10000, 20000
+                    if iteration < warmup_start: current_lambda_d = 0.0
+                    elif iteration > warmup_end: current_lambda_d = self.lambda_d
+                    else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
+
+                    if current_lambda_d > 0:
+                        if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                            alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
+                        else:
+                            alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
+                        
+                        active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
+                        active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
+                        
+                        if active_indices.numel() > 0:
+                            # ⚠️ 绝对防爆机制：强制切断与 use_mc 的关联，永远最多只采样 30000 点进行 MLP 推理！
+                            if active_indices.numel() > 30000:
+                                perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
+                                active_indices = active_indices[perm]
+                                sampled_mask = torch.zeros_like(active_dynamic_mask)
+                                sampled_mask[active_indices] = True
+                                active_dynamic_mask = sampled_mask
+
+                            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
+                            total_reg_loss += current_lambda_d * velocity.norm(p=2, dim=1).mean()
+
+                # --- 硬约束 ---
+                if self.use_hard:
+                    static_mask = (self.gaussians._mask_dynamic == 1)
+                    if static_mask.any():
+                        static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
+                        # ⚠️ 绝对防爆机制：强制切断与 use_mc 的关联！
+                        if static_indices.numel() > 30000:
+                            perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
+                            static_indices = static_indices[perm]
+                            sampled_static_mask = torch.zeros_like(static_mask)
+                            sampled_static_mask[static_indices] = True
+                            static_mask = sampled_static_mask
+
+                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
+                        total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
+
+                # =========================================================
+                # 4. 统一反向传播 (剔除双重 Backward 的性能毒瘤)
+                # =========================================================
+                if isinstance(total_reg_loss, torch.Tensor):
+                    current_loss = current_loss + total_reg_loss
+                    
                 current_loss = current_loss / batch_size
-                current_loss.backward()
+                current_loss.backward()  # <--- 整个循环只允许有这一个 backward！
                 loss += current_loss.item()
                 
+                # 5. 梯度收集 (维持你写好的静动态点分离逻辑)
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
