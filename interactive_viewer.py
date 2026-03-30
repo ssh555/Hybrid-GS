@@ -113,78 +113,13 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     for i in range(0, len(train_cams), max_frames):
         view_cams.append(train_cams[i:i+max_frames])
     max_cams = len(view_cams)
-    print(f"[INFO] [渲染器] 数据集解析完成，共 {max_cams} 个视角，每个视角 {max_frames} 帧。")
+    print(f"[渲染器] 数据集解析完成，共 {max_cams} 个视角，每个视角 {max_frames} 帧。")
 
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
     server = viser.ViserServer(port=8080)
 
-    # ==============================
-    # 自动拟合训练相机轨道
-    # ==============================
-    cam_centers = []
-    for cams in view_cams:
-        c2w = get_c2w(cams[0])
-        cam_centers.append(c2w[:3, 3])
-
-    cam_centers = np.stack(cam_centers, axis=0)
-
-    stage_center = cam_centers.mean(axis=0)
-    stage_center[1] = np.percentile(cam_centers[:, 1], 30)
-
-    relative = cam_centers - stage_center
-
-    radius_all = np.linalg.norm(relative[:, [0, 2]], axis=1)
-    yaw_all = np.arctan2(relative[:, 0], relative[:, 2])
-    height_all = relative[:, 1]
-
-    radius_mean = float(np.mean(radius_all))
-    height_mean = float(np.mean(height_all))
-
-    yaw_min = float(np.min(yaw_all))
-    yaw_max = float(np.max(yaw_all))
-
-    r_min = float(np.percentile(radius_all, 10))
-    r_max = float(np.percentile(radius_all, 90))
-
-    h_min = float(np.percentile(height_all, 10))
-    h_max = float(np.percentile(height_all, 90))
-
-    # ==============================
-    # 安全收缩边界（避免贴训练边缘炸刺）
-    # ==============================
-    SAFE_MARGIN = 0.08
-
-    yaw_span = yaw_max - yaw_min
-    r_span = r_max - r_min
-    h_span = h_max - h_min
-
-    yaw_min += yaw_span * SAFE_MARGIN
-    yaw_max -= yaw_span * SAFE_MARGIN
-
-    r_min += r_span * SAFE_MARGIN
-    r_max -= r_span * SAFE_MARGIN
-
-    h_min += h_span * SAFE_MARGIN
-    h_max -= h_span * SAFE_MARGIN
-
-    roam_state = {
-        "yaw": float((yaw_min + yaw_max) * 0.5),
-        "radius": float(np.clip(radius_mean, r_min, r_max)),
-        "height": float(np.clip(height_mean, h_min, h_max)),
-    }
-
-    print("[INFO] [自由漫游约束初始化完成]")
-    print(f"[INFO] yaw: {np.degrees(yaw_min):.1f}° ~ {np.degrees(yaw_max):.1f}°")
-    print(f"[INFO] radius: {r_min:.3f} ~ {r_max:.3f}")
-    print(f"[INFO] height: {h_min:.3f} ~ {h_max:.3f}")
-
-    warning_state = {
-        "yaw": False,
-        "radius": False,
-        "height": False,
-    }
 
     # ==========================================
     # 🎬 UI 控制台
@@ -201,15 +136,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
         slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
         slider_speed = server.gui.add_slider("⚡ 播放速度倍率", 0.25, 2.0, 0.05, 1.0)
-
         gui_res_scale = server.gui.add_slider("🖥️ 渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
-    with server.gui.add_folder("🕹️ 扇形漫游控制", expand_by_default=True):
-        btn_w = server.gui.add_button("W 前进")
-        btn_s = server.gui.add_button("S 后退")
-        btn_a = server.gui.add_button("A 左移")
-        btn_d = server.gui.add_button("D 右移")
-        btn_q = server.gui.add_button("Q 上升")
-        btn_e = server.gui.add_button("E 下降")
 
     play_state = {"playing": False}
 
@@ -222,34 +149,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     @gui_sync_cam.on_click
     def _(_):
         gui_free_roam.value = False
-
-    MOVE_RADIUS = radius_mean * 0.03
-    MOVE_YAW = np.radians(2.0)
-    MOVE_HEIGHT = 0.05
-
-    @btn_w.on_click
-    def _(_):
-        roam_state["radius"] -= MOVE_RADIUS
-
-    @btn_s.on_click
-    def _(_):
-        roam_state["radius"] += MOVE_RADIUS
-
-    @btn_a.on_click
-    def _(_):
-        roam_state["yaw"] -= MOVE_YAW
-
-    @btn_d.on_click
-    def _(_):
-        roam_state["yaw"] += MOVE_YAW
-
-    @btn_q.on_click
-    def _(_):
-        roam_state["height"] += MOVE_HEIGHT
-
-    @btn_e.on_click
-    def _(_):
-        roam_state["height"] -= MOVE_HEIGHT
 
     last_update_time = time.time()
     TARGET_FPS = 30.0
@@ -307,112 +206,49 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 client.scene.set_background_image(canvas, format="png")
 
             else:
-                # ==========================================
-                # 🕹️ 扇形柱体 WASDQE 漫游（稳定版）
-                # ==========================================
-                render_h = int(selected_cam.image_height * scale)
-                render_w = int(render_h * browser_aspect)
+                # ==========================================================
+                # 🕹️ 自由漫游模式：对标 gsplat 的纯净矩阵推导
+                # ==========================================================
+                cam_state = client.camera
+                
+                base_h = selected_cam.image_height * scale
+                render_h = int(base_h)
+                render_w = int(base_h * browser_aspect)
 
-                # -----------------------------
-                # clamp 到训练范围
-                # -----------------------------
-                roam_state["yaw"] = float(np.clip(roam_state["yaw"], yaw_min, yaw_max))
-                roam_state["radius"] = float(np.clip(roam_state["radius"], r_min, r_max))
-                roam_state["height"] = float(np.clip(roam_state["height"], h_min, h_max))
+                # 1. 获取 Viser OpenGL 坐标系
+                c2w_gl = np.eye(4, dtype=np.float32)
+                c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
+                c2w_gl[:3, 3] = cam_state.position
 
-                yaw = roam_state["yaw"]
-                radius = roam_state["radius"]
-                height = roam_state["height"]
+                # 2. 转换为 3DGS OpenCV 坐标系
+                c2w_cv = c2w_gl.copy()
+                c2w_cv[:, 1:3] *= -1 
 
-                # -----------------------------
-                # 相机位置（扇形柱体）
-                # -----------------------------
-                cam_pos = np.array([
-                    stage_center[0] + radius * np.sin(yaw),
-                    stage_center[1] + height,
-                    stage_center[2] + radius * np.cos(yaw),
-                ], dtype=np.float32)
-
-                # -----------------------------
-                # 始终看向舞台中心
-                # -----------------------------
-                target = stage_center.copy()
-                target[1] += height * 0.15
-
-                forward = target - cam_pos
-                forward /= (np.linalg.norm(forward) + 1e-8)
-
-                world_up = np.array([0, 1, 0], dtype=np.float32)
-
-                right = np.cross(world_up, forward)
-                right /= (np.linalg.norm(right) + 1e-8)
-
-                up = np.cross(forward, right)
-                up /= (np.linalg.norm(up) + 1e-8)
-
-                c2w_cv = np.eye(4, dtype=np.float32)
-                c2w_cv[:3, 0] = right
-                c2w_cv[:3, 1] = up
-                c2w_cv[:3, 2] = forward
-                c2w_cv[:3, 3] = cam_pos
-
+                # 3. 标准求逆获得 W2C
                 w2c_cv = np.linalg.inv(c2w_cv)
+                
+                # 4. 转换为 CUDA Column-Major 布局
+                wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
 
-                wvt = torch.tensor(
-                    w2c_cv,
-                    dtype=torch.float32,
-                    device="cuda"
-                ).transpose(0, 1)
-
-                fovy = selected_cam.FoVy
-                fovx = 2.0 * math.atan(
-                    math.tan(fovy / 2.0) * browser_aspect
-                )
-
-                proj = getProjectionMatrix(
-                    znear=0.1,
-                    zfar=100.0,
-                    fovX=fovx,
-                    fovY=fovy
-                ).transpose(0, 1).cuda()
+                fovy = cam_state.fov
+                fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * browser_aspect)
+                
+                # 🛡️ 防御措施：稍微提高 znear 到 0.1，减轻长矛穿模爆屏的视觉污染
+                proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
 
                 view_cam = ProxyCam(selected_cam)
                 view_cam.override_w = render_w
                 view_cam.override_h = render_h
                 view_cam.override_wvt = wvt
                 view_cam.override_proj = proj
-                view_cam.override_full = wvt @ proj
-                view_cam.override_center = torch.tensor(
-                    cam_pos,
-                    dtype=torch.float32,
-                    device="cuda"
-                )
+                view_cam.override_full = wvt.matmul(proj)
+                view_cam.override_center = torch.tensor(c2w_cv[:3, 3], dtype=torch.float32, device="cuda")
                 view_cam.override_fovx = fovx
                 view_cam.override_fovy = fovy
 
                 out = render(view_cam, gaussians, pipe, background)
                 img = torch.clamp(out["render"], 0, 1)
-                img_np = (
-                    img.cpu().numpy().transpose(1, 2, 0) * 255
-                ).astype(np.uint8)
-
-                # ==========================================
-                # 非刷屏 Warning 日志
-                # ==========================================
-                yaw_warn = yaw <= yaw_min + yaw_span * 0.1 or yaw >= yaw_max - yaw_span * 0.1
-                r_warn = radius <= r_min + r_span * 0.1 or radius >= r_max - r_span * 0.1
-                h_warn = height <= h_min + h_span * 0.1 or height >= h_max - h_span * 0.1
-
-                if yaw_warn and not warning_state["yaw"]:
-                    print(f"[WARNING] yaw 接近训练边界: {np.degrees(yaw):.1f}°")
-                if r_warn and not warning_state["radius"]:
-                    print(f"[WARNING] 半径接近训练边界: {radius:.3f}")
-                if h_warn and not warning_state["height"]:
-                    print(f"[WARNING] 高度接近训练边界: {height:.3f}")
-
-                warning_state["yaw"] = yaw_warn
-                warning_state["radius"] = r_warn
-                warning_state["height"] = h_warn
+                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
                 client.scene.set_background_image(img_np, format="png")
 
