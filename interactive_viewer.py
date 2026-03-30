@@ -205,29 +205,52 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
             else:
                 # ==========================================================
-                # 🕹️ 自由漫游模式：暴力覆写所有渲染矩阵！
+                # 🕹️ 自由漫游模式：完全复刻 cameras.py 的底层计算流！
                 # ==========================================================
                 cam_state = client.camera
+                
+                # 1. 强制锁死垂直视场角，防止由于浏览器过宽导致的边缘未训练区域炸刺
+                client.camera.fov = selected_cam.FoVy 
                 
                 base_h = selected_cam.image_height * scale
                 render_h = int(base_h)
                 render_w = int(base_h * browser_aspect)
 
+                # 2. 从 Viser 获取 OpenGL 坐标系的 Camera-to-World (C2W) 矩阵
                 c2w_gl = np.eye(4, dtype=np.float32)
                 c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
                 c2w_gl[:3, 3] = cam_state.position
 
+                # 3. 转换为 OpenCV 坐标系 (翻转 Y、Z 轴)
                 c2w_cv = c2w_gl.copy()
                 c2w_cv[:, 1:3] *= -1 
 
+                # 4. 求逆，得到 World-to-Camera (W2C) 矩阵
                 w2c_cv = np.linalg.inv(c2w_cv)
-                wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
+                
+                # ==========================================
+                # 🚀 核心转换：提取 COLMAP 格式的 R 和 T
+                # ⚠️ 注意：3DGS 的 getWorld2View2 内部会对 R 再次转置，
+                # 所以我们这里传给它的，必须是 W2C 旋转矩阵的转置 (R^T)！
+                # ==========================================
+                R_cv = w2c_cv[:3, :3].T 
+                T_cv = w2c_cv[:3, 3]
 
-                fovy = cam_state.fov
+                # 5. 像素级复刻 cameras.py 第 164 行的 WVT 计算
+                wvt = torch.tensor(
+                    getWorld2View2(R_cv, T_cv, np.array([0.0, 0.0, 0.0]), 1.0), 
+                    dtype=torch.float32
+                ).transpose(0, 1).cuda()
+
+                fovy = selected_cam.FoVy 
                 fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * browser_aspect)
                 
-                proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+                # 6. 像素级复刻 cameras.py 第 168 行的 Proj 计算 (注意 znear=0.01)
+                proj = getProjectionMatrix(
+                    znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy
+                ).transpose(0, 1).cuda()
 
+                # 7. 暴力覆写 RenderCam
                 view_cam = RenderCam(selected_cam)
                 view_cam.image_width = render_w
                 view_cam.image_height = render_h
@@ -235,8 +258,12 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 view_cam.FoVy = fovy
                 view_cam.world_view_transform = wvt
                 view_cam.projection_matrix = proj
-                view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
-                view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
+                
+                # 像素级复刻 cameras.py 第 170-171 行
+                view_cam.full_proj_transform = (wvt.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
+                view_cam.camera_center = wvt.inverse()[3, :3]
+
+                # --- 获取 4D 掩码并渲染 ---
                 active_mask = None
                 if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
                     frame_id = int(slider_frame.value)
