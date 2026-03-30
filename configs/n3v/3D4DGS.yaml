@@ -6,10 +6,10 @@ rot_4d: True
 force_sh_3d: True
 batch_size: 4
 exhaust_test: False
-start_checkpoint: "output/3d4dgs/miku_shaungxue_daxi/test_short/chkpnt_6000.pth"
+start_checkpoint: "output/3d4dgs/miku_shaungxue_daxi/test_short/chkpnt_20000.pth"
 
 ModelParams:
-  sh_degree: 2
+  sh_degree: 3
   source_path: "./datasets/miku_shaungxue_daxi/test_short"
   model_path: "output/3d4dgs/miku_shaungxue_daxi/test_short"
   images: "images"
@@ -35,12 +35,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 6000
+  iterations: 20000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 6000
+  position_lr_max_steps: 20000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -51,7 +51,7 @@ OptimizationParams:
   densification_interval: 100 
   opacity_reset_interval: 30000
   densify_from_iter: 500 
-  densify_until_iter: 30000
+  densify_until_iter: 10000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: 2000000
@@ -59,4 +59,4 @@ OptimizationParams:
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
-  lambda_motion: 0.5
+  lambda_motion: 0.1
