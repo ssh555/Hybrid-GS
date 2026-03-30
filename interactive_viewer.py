@@ -182,8 +182,25 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 c2w_gl = get_c2w(selected_cam)
                 client.camera.position = c2w_gl[:3, 3]
                 client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
+                
+                out = render(view_cam, gaussians, pipe, background)
+                img = torch.clamp(out["render"], 0, 1)
+                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-                # ... (后续渲染和 canvas 贴图代码保持不变) ...
+                render_aspect = render_w / render_h
+                if browser_aspect > render_aspect:
+                    canvas_h = render_h
+                    canvas_w = int(render_h * browser_aspect)
+                else:
+                    canvas_w = render_w
+                    canvas_h = int(render_w / browser_aspect)
+
+                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+                y0 = (canvas_h - render_h) // 2
+                x0 = (canvas_w - render_w) // 2
+                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
+
+                client.scene.set_background_image(canvas, format="png")
 
             else:
                 # ==========================================================
