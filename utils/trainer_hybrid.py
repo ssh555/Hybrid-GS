@@ -20,8 +20,9 @@ class TrainerHybrid(TrainerSWinGS):
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
         self.use_mc = getattr(args, 'use_mc_sampling', True)
+
     def robust_hard_constraint_classifier(self):
-        """核心机制：自适应相对硬约束判定 (Scale-Invariant)"""
+        """核心机制：基于运动学的物理冻结名单抓取"""
         with torch.no_grad():
             if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                 alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
@@ -30,24 +31,18 @@ class TrainerHybrid(TrainerSWinGS):
                 
             dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
             if not dynamic_mask.any():
-                return
+                return None
             
             t_base = self.gaussians.get_t
-            
-            if hasattr(self, 'total_frames') and self.total_frames > 0:
-                max_dt = 5.0 / self.total_frames 
-            else:
-                max_dt = 0.02
+            max_dt = 5.0 / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.02
                 
             if self.use_mc:
-                num_samples = 8
-                dt_steps = torch.linspace(0.001, max_dt, steps=num_samples, device="cuda").unsqueeze(-1)
+                dt_steps = torch.linspace(0.001, max_dt, steps=8, device="cuda").unsqueeze(-1)
             else:
-                num_samples = 2
                 dt_steps = torch.tensor([0.005, max_dt], device="cuda").unsqueeze(-1)
             
             displacement_list = []
-            for i in range(num_samples):
+            for i in range(dt_steps.shape[0]):
                 eval_t = torch.clamp(t_base + dt_steps[i], 0.0, 1.0)
                 _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, eval_t, mask=dynamic_mask)
                 displacement_list.append(v.norm(dim=-1))
@@ -56,28 +51,23 @@ class TrainerHybrid(TrainerSWinGS):
             r_avg = all_displacements.mean(dim=1)
             r_max = all_displacements.max(dim=1)[0]
             
-            # ==========================================================
-            # 🌟 核心升级：自适应相对阈值 (Scale-Invariant)
-            # ==========================================================
-            # 1. 计算当前场景的平均运动幅度
+            # 🌟 真正的自适应：放宽容忍度，允许均值 40% 的微弱抖动被物理冻结
             scene_mean_movement = r_avg.mean().item()
-            
-            # 2. 假设背景的运动幅度应该远低于整体平均值 (比如只有平均值的 30%)
-            # 我们同时设一个极宽容的绝对上限 (1.0)，防止把停止跳舞的 Miku 也冻结了
-            adaptive_tau = min(scene_mean_movement * 0.3, 1.0)
+            adaptive_tau = scene_mean_movement * 0.4
             adaptive_tau_max = adaptive_tau * 2.0
             
-            # 3. 使用自适应阈值进行判定
             is_static = (r_avg < adaptive_tau) & (r_max < adaptive_tau_max)
             
             if is_static.any():
+                # 提取出需要物理冻结的全局布尔掩码
+                global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
-                self.gaussians._mask_dynamic[global_static_indices] = 1
-                self.gaussians._t.data[global_static_indices] = 0.0
+                global_static_mask[global_static_indices] = True
                 
-                # 打印情报，让你对当前模型的“空间尺度”了如指掌！
-                print(f"\n❄️ [硬约束触发] 场景均值位移: {scene_mean_movement:.4f} | 自适应阈值: < {adaptive_tau:.4f} | 成功冻结了 {global_static_indices.numel()} 个点!")
-
+                return global_static_mask
+            
+            return None
+        
     def train(self):
         print(f"\n[TrainerHybrid] 开始终极混合训练！已激活软硬双重约束。")
         self.metrics_tracker.start_timer()
@@ -361,14 +351,19 @@ class TrainerHybrid(TrainerSWinGS):
 
             with torch.no_grad():
                 # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                # 🚀 创新点：绑定 SWinGS 滑动窗口节拍的“延迟硬约束”
-                
-                # 1. 留出充分的热身期 (总迭代的1/5)，让 4D MLP 学会基础动作
                 freeze_start_iter = self.opt.iterations // 5
                 
-                # 2. 完美绑定：只在窗口即将滑动的那一刻 (模型对当前窗口拟合最完美时) 触发冻结！
+                # 在窗口滑动时，触发严格的物理降维
                 if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
-                     self.robust_hard_constraint_classifier()
+                     kinematic_static_mask = self.robust_hard_constraint_classifier()
+                     
+                     if kinematic_static_mask is not None and kinematic_static_mask.any():
+                         if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                             # 🚀 调用自定义的物理转移函数
+                             self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
+                         else:
+                             print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                
                 # ====================================================================
                 if iteration < self.opt.densify_until_iter:
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -400,8 +395,8 @@ class TrainerHybrid(TrainerSWinGS):
 
                             self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, active_grad_t_threshold)
                             
-                            if hasattr(self.gaussians, 'dynamic2static'):
-                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
+                            # if hasattr(self.gaussians, 'dynamic2static'):
+                            #     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                 
                 # 大扫除独立出来
                 if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):

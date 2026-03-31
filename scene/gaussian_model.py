@@ -912,4 +912,35 @@ class GaussianModel:
         self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
         # ==========================================================
-    
+        
+    def kinematic_dynamic2static(self, static_mask):
+        """
+        [毕设专属核心算法]：运动学物理冻结 (Kinematic Physical Freeze)
+        直接接收来自 Trainer 运动学网络的精确布尔掩码，将 4D 动态点永久剥离并降维成 3D 静态点。
+        """
+        # 确保 mask 是标准的一维布尔张量
+        static_mask = static_mask.squeeze()
+        
+        # 如果没有点需要冻结，直接返回
+        if static_mask.sum() == 0:
+            return
+            
+        # 1. 提取所有需要物理转移的 4D 高斯的纯空间属性
+        new_xyz = self._xyz[static_mask]
+        new_features_dc = self._features_dc[static_mask]
+        new_features_rest = self._features_rest[static_mask]
+        new_opacities = self._opacity[static_mask]
+        new_scaling = self._scaling[static_mask]
+        
+        # 2. 核心降维打击：将 4D 旋转 (双四元数/李代数) 坍缩为纯 3D 旋转
+        r_4d = build_rotation_4d(self._rotation[static_mask], self._rotation_r[static_mask])
+        r_3d = r_4d[:, :3, :3] # 截取左上角的 3x3 空间旋转矩阵
+        new_rotation = rotation_matrix_to_rotation_3d(r_3d) # 转回 3D 四元数
+
+        # 3. 从 4D 动态池中“物理蒸发”这些点
+        # (调用你之前修改过的 prune_points，它会同步清理 _start_frame, _mask_dynamic 等生命周期数组，防止崩溃)
+        self.prune_points(static_mask)
+
+        # 4. 将提取出的干净 3D 属性，永久焊死在 3D 静态高斯池中
+        # (加入 static_xyz 并在优化器中注册独立的 3D 梯度)
+        self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
