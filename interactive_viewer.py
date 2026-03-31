@@ -12,10 +12,11 @@ from omegaconf.dictconfig import DictConfig
 from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
-from utils.graphics_utils import getWorld2View2, getProjectionMatrix
+from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift, getProjectionMatrixCV, pix2ndc
 
 class RenderCam:
     def __init__(self, base_cam):
+        self.base_cam = base_cam
         # 1. 拷贝渲染器 (render) 强制需要的核心标量
         self.image_width = base_cam.image_width
         self.image_height = base_cam.image_height
@@ -33,11 +34,6 @@ class RenderCam:
         self.uid = getattr(base_cam, 'uid', 0)
         self.image_name = getattr(base_cam, 'image_name', 'roam_cam')
         self.gt_alpha_mask = getattr(base_cam, 'gt_alpha_mask', None)
-
-        self.cx = self.image_width / 2.0
-        self.cy = self.image_height / 2.0
-        self.fl_x = self.cx / math.tan(self.FoVx / 2.0)
-        self.fl_y = self.cy / math.tan(self.FoVy / 2.0)
         
     def get_rays(self):
         """
@@ -62,6 +58,26 @@ class RenderCam:
         
         return self.camera_center[None, None], directions / torch.norm(directions, dim=-1, keepdim=True)
 
+    # 打印RenderCame和base_cam的核心参数对比，验证是否成功断开引用
+    def PrintSelfInfo(self):
+        print("=== RenderCam 核心参数 ===")
+        print(f"Image Size: {self.image_width}x{self.image_height}")
+        print(f"FoV: ({self.FoVx:.2f}, {self.FoVy:.2f})")
+        print(f"Timestamp: {self.timestamp}")
+        print(f"Camera Center: {self.camera_center.cpu().numpy()}")
+        print(f"World-View Transform (first 3 rows):\n{self.world_view_transform.cpu().numpy()[:3]}")
+        print(f"Projection Matrix (first 3 rows):\n{self.projection_matrix.cpu().numpy()[:3]}")
+        print("===========================")
+        print("=== BaseCam 核心参数 ===")
+        print(f"Image Size: {self.base_cam.image_width}x{self.base_cam.image_height}")
+        print(f"FoV: ({self.base_cam.FoVx:.2f}, {self.base_cam.FoVy:.2f})")
+        print(f"Timestamp: {self.base_cam.timestamp}")
+        print(f"Camera Center: {self.base_cam.camera_center.cpu().numpy()}")
+        print(f"World-View Transform (first 3 rows):\n{self.base_cam.world_view_transform.cpu().numpy()[:3]}")
+        print(f"Projection Matrix (first 3 rows):\n{self.base_cam.projection_matrix.cpu().numpy()[:3]}")
+        print("===========================")
+
+
 # ==============================
 # Utils
 # ==============================
@@ -70,6 +86,29 @@ def get_c2w(cam):
     c2w = np.linalg.inv(w2c)
     c2w[:, 1:3] *= -1
     return c2w
+
+def slerp(q0, q1, t):
+    """标准的四元数球面线性插值 (Spherical Linear Interpolation)"""
+    dot = np.sum(q0 * q1)
+    # 确保走最短路径，防止镜头翻转
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    
+    DOT_THRESHOLD = 0.9995
+    if dot > DOT_THRESHOLD:
+        # 如果极度接近，退化为普通线性插值
+        res = q0 + t * (q1 - q0)
+        return res / np.linalg.norm(res)
+        
+    theta_0 = np.arccos(dot)
+    sin_theta_0 = np.sin(theta_0)
+    theta = theta_0 * t
+    sin_theta = np.sin(theta)
+    
+    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return (s0 * q0) + (s1 * q1)
 
 # ==============================
 # 主函数
@@ -123,6 +162,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     # ==========================================
     with server.gui.add_folder("🎬 导播台面板"):
         gui_free_roam = server.gui.add_checkbox("🕹️ 启用自由漫游", initial_value=False)
+        gui_cam_interp = server.gui.add_slider("🎥 平滑漫游轨道", 0.0, float(max_cams-1), 0.01, 0.0)
+
         gui_sync_cam = server.gui.add_button("🎯 视角归位 (一键对齐原轨迹)")
         
         cam_id = server.gui.add_slider("🎥 原版机位切换", 0, max_cams-1, 1, 0)
@@ -204,42 +245,83 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
             else:
                 # ==========================================================
-                # 🕹️ 自由漫游模式：暴力覆写所有渲染矩阵！
+                # 🚂 受限轨道漫游：基于真实相机的时空平滑插值
                 # ==========================================================
-                cam_state = client.camera
+                frame_idx = int(slider_frame.value)
                 
-                base_h = selected_cam.image_height * scale
-                render_h = int(base_h)
-                render_w = int(base_h * browser_aspect)
-
-                c2w_gl = np.eye(4, dtype=np.float32)
-                c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
-                c2w_gl[:3, 3] = cam_state.position
-
-                c2w_cv = c2w_gl.copy()
-                c2w_cv[:, 1:3] *= -1 
-
-                w2c_cv = np.linalg.inv(c2w_cv)
-                wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
-
-                fovy = cam_state.fov
-                fovx = 2.0 * math.atan(math.tan(fovy / 2.0) * browser_aspect)
+                # 1. 计算插值索引与权重 alpha
+                u = gui_cam_interp.value
+                idx_A = int(math.floor(u))
+                idx_B = min(idx_A + 1, max_cams - 1)
+                alpha = u - idx_A
                 
-                proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+                # 2. 提取当前播放帧对应的两个相邻真实相机
+                cam_A = view_cams[idx_A][frame_idx % len(view_cams[idx_A])]
+                cam_B = view_cams[idx_B][frame_idx % len(view_cams[idx_B])]
+                
+                # 3. 获取 OpenGL 格式的 C2W 矩阵 (复用你原有的正确转换逻辑)
+                c2w_A = get_c2w(cam_A)
+                c2w_B = get_c2w(cam_B)
+                
+                # 4. 平移插值 (LERP)
+                pos_interp = (1.0 - alpha) * c2w_A[:3, 3] + alpha * c2w_B[:3, 3]
+                
+                # 5. 旋转插值 (SLERP)
+                q_A = tf.SO3.from_matrix(c2w_A[:3, :3]).wxyz
+                q_B = tf.SO3.from_matrix(c2w_B[:3, :3]).wxyz
+                q_interp = slerp(q_A, q_B, alpha)
+                R_interp = tf.SO3(q_interp).as_matrix()
 
-                view_cam = RenderCam(selected_cam)
+                # 6. 组装插值后的 C2W，并翻转 Y,Z 转换回 OpenCV 坐标系
+                c2w_interp_gl = np.eye(4, dtype=np.float32)
+                c2w_interp_gl[:3, :3] = R_interp
+                c2w_interp_gl[:3, 3] = pos_interp
+
+                c2w_interp_cv = c2w_interp_gl.copy()
+                c2w_interp_cv[:, 1:3] *= -1 
+                
+                # 7. 求逆得到 W2C 并送入显存
+                w2c_interp_cv = np.linalg.inv(c2w_interp_cv)
+                wvt = torch.tensor(w2c_interp_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
+                
+                # 8. FOV 平滑过渡与画布尺寸计算
+                fovy_interp = (1.0 - alpha) * cam_A.FoVy + alpha * cam_B.FoVy
+                fovx_interp = (1.0 - alpha) * cam_A.FoVx + alpha * cam_B.FoVx
+                
+                render_h = int(cam_A.image_height * scale)
+                render_w = int(cam_A.image_width * scale)
+                
+                # proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp).transpose(0, 1).cuda()
+                if cam_A.cx > 0:
+                    proj= getProjectionMatrixCenterShift(0.1, 100.0, cam_A.cx, cam_A.cy, cam_A.fl_x, cam_A.fl_y, cam_A.image_width, cam_A.image_height).transpose(0,1)
+                else:
+                    if cam_A.cyr != 0.0 :
+                        proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp, cx=cam_A.cxr, cy=cam_A.cyr).transpose(0,1)
+                    else: 
+                        proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp).transpose(0,1)
+                
+                # 9. 实例化 RenderCam 并暴力覆写参数
+                view_cam = RenderCam(cam_A) 
                 view_cam.image_width = render_w
                 view_cam.image_height = render_h
-                view_cam.FoVx = fovx
-                view_cam.FoVy = fovy
+                view_cam.FoVx = fovx_interp
+                view_cam.FoVy = fovy_interp
                 view_cam.world_view_transform = wvt
-                view_cam.projection_matrix = proj
+                view_cam.projection_matrix = proj.cuda()
                 view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
                 view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
+
+                view_cam.PrintSelfInfo()
+
+                # 10. 锁定前端 UI，让鼠标彻底无法拖拽改变视角
+                client.camera.position = pos_interp
+                client.camera.wxyz = q_interp
+                client.camera.fov = fovy_interp
+                
+                # 11. 执行原生渲染与遮罩过滤 (完全保留你原始的这部分逻辑)
                 active_mask = None
                 if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                    frame_id = int(slider_frame.value)
-                    active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
+                    active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
                     if hasattr(gaussians, '_mask_dynamic'):
                         active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
 
@@ -251,7 +333,21 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 img = torch.clamp(out["render"], 0, 1)
                 img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-                client.scene.set_background_image(img_np, format="png")
+                # client.scene.set_background_image(img_np, format="png")
+                render_aspect = view_cam.image_width / view_cam.image_height
+                if browser_aspect > render_aspect:
+                    canvas_h = view_cam.image_height
+                    canvas_w = int(view_cam.image_height * browser_aspect)
+                else:
+                    canvas_w = view_cam.image_width
+                    canvas_h = int(view_cam.image_width / browser_aspect)
+
+                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+                y0 = (canvas_h - view_cam.image_height) // 2
+                x0 = (canvas_w - view_cam.image_width) // 2
+                canvas[y0:y0+view_cam.image_height, x0:x0+view_cam.image_width] = img_np
+
+                client.scene.set_background_image(canvas, format="png")
 
         time.sleep(0.01)
 
