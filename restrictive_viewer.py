@@ -162,6 +162,10 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     # ==========================================
     with server.gui.add_folder("🎬 导播台面板"):
         gui_cam_interp = server.gui.add_slider("🎥 平滑漫游轨道", 0.0, float(max_cams-1), 0.01, 0.0)
+        gui_offset_x = server.gui.add_slider("↔️ 左右探头 (X)", -2.0, 2.0, 0.01, 0.0)
+        gui_offset_y = server.gui.add_slider("↕️ 站起/蹲下 (Y)", -2.0, 2.0, 0.01, 0.0)
+        gui_offset_z = server.gui.add_slider("↙↗ 身体前后 (Z)", -2.0, 2.0, 0.01, 0.0)
+        btn_reset_offset = server.gui.add_button("🔄 一键归位")
 
         with server.gui.add_folder("播放控制", expand_by_default=True):
             btn_play = server.gui.add_button("▶️ 播放")
@@ -172,6 +176,12 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         gui_res_scale = server.gui.add_slider("🖥️ 渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
 
     play_state = {"playing": False}
+
+    @btn_reset_offset.on_click
+    def _(_):
+        gui_offset_x.value = 0.0
+        gui_offset_y.value = 0.0
+        gui_offset_z.value = 0.0
 
     @btn_play.on_click
     def _(_): play_state["playing"] = True
@@ -228,9 +238,27 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             q_interp = slerp(q_A, q_B, alpha)
             R_interp = tf.SO3(q_interp).as_matrix()
 
+            # ==========================================================
+            # 🌟 观众席位移模拟计算
+            # ==========================================================
+            dx = gui_offset_x.value
+            dy = gui_offset_y.value
+            dz = gui_offset_z.value
+            
+            # 构建局部偏移向量。在 OpenGL 相机坐标系中：
+            # X 正向是右，Y 正向是上，Z 负向是镜头正前方 (所以 dz 给它取反，让正数代表往前靠)
+            local_offset = np.array([dx, dy, -dz], dtype=np.float32)
+            
+            # 局部偏移 乘以 相机的旋转矩阵 = 世界空间下的绝对偏移
+            world_offset = R_interp @ local_offset
+            
+            # 基础插值坐标 + 绝对偏移 = 最终实际的机位
+            pos_final = pos_interp + world_offset
+            # ==========================================================
+
             c2w_interp_gl = np.eye(4, dtype=np.float32)
             c2w_interp_gl[:3, :3] = R_interp
-            c2w_interp_gl[:3, 3] = pos_interp
+            c2w_interp_gl[:3, 3] = pos_final # <-- 换成带有偏移的 pos_final
 
             c2w_interp_cv = c2w_interp_gl.copy()
             c2w_interp_cv[:, 1:3] *= -1 
@@ -262,9 +290,9 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
             view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
 
-            view_cam.PrintSelfInfo()
+            # view_cam.PrintSelfInfo()
 
-            client.camera.position = pos_interp
+            client.camera.position = pos_final
             client.camera.wxyz = q_interp
             client.camera.fov = fovy_interp
             
