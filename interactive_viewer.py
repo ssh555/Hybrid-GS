@@ -122,11 +122,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     # 🎬 UI 控制台
     # ==========================================
     with server.gui.add_folder("🎬 导播台面板"):
-        gui_free_roam = server.gui.add_checkbox("🕹️ 启用自由漫游", initial_value=False)
-        gui_sync_cam = server.gui.add_button("🎯 视角归位 (一键对齐原轨迹)")
-        
-        cam_id = server.gui.add_slider("🎥 原版机位切换", 0, max_cams-1, 1, 0)
-
         with server.gui.add_folder("播放控制", expand_by_default=True):
             btn_play = server.gui.add_button("▶️ 播放")
             btn_pause = server.gui.add_button("⏸ 暂停")
@@ -143,9 +138,16 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     @btn_pause.on_click
     def _(_): play_state["playing"] = False
 
-    @gui_sync_cam.on_click
-    def _(_):
-        gui_free_roam.value = False
+    @server.on_client_connect
+    def on_client_connect(client):
+        # 获取初始相机位置（使用选中的相机）
+        selected_cam = view_cams[max_cams // 2][0]  # 使用第一帧
+        c2w_gl = get_c2w(selected_cam)
+        
+        # 设置客户端相机位置和姿态
+        client.camera.position = c2w_gl[:3, 3]
+        client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
+
 
     last_update_time = time.time()
     TARGET_FPS = 30.0
@@ -162,115 +164,79 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             slider_frame.value %= max_frames
 
         frame_idx = int(slider_frame.value)
-        selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
+        selected_cam = view_cams[max_cams // 2][frame_idx % len(view_cams[max_cams // 2])]
 
         for client in server.get_clients().values():
             scale = gui_res_scale.value
             browser_aspect = client.camera.aspect
-            if not gui_free_roam.value:
-                # ==========================================================
-                # 🎬 导播模式：只修改分辨率，其余保持原样
-                # ==========================================================
-                render_w = int(selected_cam.image_width * scale)
-                render_h = int(selected_cam.image_height * scale)
-                
-                # 实例化我们的纯净相机
-                view_cam = RenderCam(selected_cam)
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                
-                c2w_gl = get_c2w(selected_cam)
-                client.camera.position = c2w_gl[:3, 3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
-                
-                out = render(view_cam, gaussians, pipe, background)
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+            # ==========================================================
+            # 🕹️ 自由漫游模式：暴力覆写所有渲染矩阵！
+            # ==========================================================
+            cam_state = client.camera
+            
+            render_w = int(selected_cam.image_width * scale)
+            render_h = int(selected_cam.image_height * scale)
 
-                render_aspect = render_w / render_h
-                if browser_aspect > render_aspect:
-                    canvas_h = render_h
-                    canvas_w = int(render_h * browser_aspect)
-                else:
-                    canvas_w = render_w
-                    canvas_h = int(render_w / browser_aspect)
+            c2w_gl = np.eye(4, dtype=np.float32)
+            c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
+            c2w_gl[:3, 3] = cam_state.position
 
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - render_h) // 2
-                x0 = (canvas_w - render_w) // 2
-                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
+            c2w_cv = c2w_gl.copy()
+            c2w_cv[:, 1:3] *= -1 
 
-                client.scene.set_background_image(canvas, format="png")
+            w2c_cv = np.linalg.inv(c2w_cv)
+            wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
 
+            fovy = selected_cam.FoVy
+            fovx = selected_cam.FoVx
+            if selected_cam.cx > 0:
+                proj= getProjectionMatrixCenterShift(0.1, 100.0, selected_cam.cx, selected_cam.cy, selected_cam.fl_x, selected_cam.fl_y, selected_cam.image_width, selected_cam.image_height).transpose(0,1)
             else:
-                # ==========================================================
-                # 🕹️ 自由漫游模式：暴力覆写所有渲染矩阵！
-                # ==========================================================
-                cam_state = client.camera
-                
-                render_w = int(selected_cam.image_width * scale)
-                render_h = int(selected_cam.image_height * scale)
+                if selected_cam.cyr != 0.0 :
+                    proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy, cx=selected_cam.cxr, cy=selected_cam.cyr).transpose(0,1)
+                else: 
+                    proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0,1)
+            
+            proj = proj.cuda()
 
-                c2w_gl = np.eye(4, dtype=np.float32)
-                c2w_gl[:3, :3] = tf.SO3(cam_state.wxyz).as_matrix()
-                c2w_gl[:3, 3] = cam_state.position
+            view_cam = RenderCam(selected_cam)
+            view_cam.image_width = render_w
+            view_cam.image_height = render_h
+            view_cam.FoVx = fovx
+            view_cam.FoVy = fovy
+            view_cam.world_view_transform = wvt
+            view_cam.projection_matrix = proj
+            view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
+            view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
+            active_mask = None
+            if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
+                frame_id = int(slider_frame.value)
+                active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
+                if hasattr(gaussians, '_mask_dynamic'):
+                    active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
 
-                c2w_cv = c2w_gl.copy()
-                c2w_cv[:, 1:3] *= -1 
+            try:
+                out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
+            except TypeError:
+                out = render(view_cam, gaussians, pipe, background)
 
-                w2c_cv = np.linalg.inv(c2w_cv)
-                wvt = torch.tensor(w2c_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
+            img = torch.clamp(out["render"], 0, 1)
+            img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-                fovy = selected_cam.FoVy
-                fovx = selected_cam.FoVx
-                if selected_cam.cx > 0:
-                    proj= getProjectionMatrixCenterShift(0.1, 100.0, selected_cam.cx, selected_cam.cy, selected_cam.fl_x, selected_cam.fl_y, selected_cam.image_width, selected_cam.image_height).transpose(0,1)
-                else:
-                    if selected_cam.cyr != 0.0 :
-                        proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy, cx=selected_cam.cxr, cy=selected_cam.cyr).transpose(0,1)
-                    else: 
-                        proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0,1)
-                
-                proj = proj.cuda()
+            render_aspect = render_w / render_h
+            if browser_aspect > render_aspect:
+                canvas_h = render_h
+                canvas_w = int(render_h * browser_aspect)
+            else:
+                canvas_w = render_w
+                canvas_h = int(render_w / browser_aspect)
 
-                view_cam = RenderCam(selected_cam)
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                view_cam.FoVx = fovx
-                view_cam.FoVy = fovy
-                view_cam.world_view_transform = wvt
-                view_cam.projection_matrix = proj
-                view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
-                view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
-                active_mask = None
-                if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                    frame_id = int(slider_frame.value)
-                    active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
-                    if hasattr(gaussians, '_mask_dynamic'):
-                        active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+            y0 = (canvas_h - render_h) // 2
+            x0 = (canvas_w - render_w) // 2
+            canvas[y0:y0+render_h, x0:x0+render_w] = img_np
 
-                try:
-                    out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-                except TypeError:
-                    out = render(view_cam, gaussians, pipe, background)
-
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-
-                render_aspect = render_w / render_h
-                if browser_aspect > render_aspect:
-                    canvas_h = render_h
-                    canvas_w = int(render_h * browser_aspect)
-                else:
-                    canvas_w = render_w
-                    canvas_h = int(render_w / browser_aspect)
-
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - render_h) // 2
-                x0 = (canvas_w - render_w) // 2
-                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
-
-                client.scene.set_background_image(canvas, format="png")
+            client.scene.set_background_image(canvas, format="png")
 
         time.sleep(0.01)
 

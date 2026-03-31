@@ -161,12 +161,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     # 🎬 UI 控制台
     # ==========================================
     with server.gui.add_folder("🎬 导播台面板"):
-        gui_free_roam = server.gui.add_checkbox("🕹️ 启用自由漫游", initial_value=False)
         gui_cam_interp = server.gui.add_slider("🎥 平滑漫游轨道", 0.0, float(max_cams-1), 0.01, 0.0)
-
-        gui_sync_cam = server.gui.add_button("🎯 视角归位 (一键对齐原轨迹)")
-        
-        cam_id = server.gui.add_slider("🎥 原版机位切换", 0, max_cams-1, 1, 0)
 
         with server.gui.add_folder("播放控制", expand_by_default=True):
             btn_play = server.gui.add_button("▶️ 播放")
@@ -184,9 +179,15 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     @btn_pause.on_click
     def _(_): play_state["playing"] = False
 
-    @gui_sync_cam.on_click
-    def _(_):
-        gui_free_roam.value = False
+    @server.on_client_connect
+    def on_client_connect(client):
+        # 获取初始相机位置（使用选中的相机）
+        selected_cam = view_cams[max_cams // 2][0]  # 使用第一帧
+        c2w_gl = get_c2w(selected_cam)
+        
+        # 设置客户端相机位置和姿态
+        client.camera.position = c2w_gl[:3, 3]
+        client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
 
     last_update_time = time.time()
     TARGET_FPS = 30.0
@@ -203,132 +204,98 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             slider_frame.value %= max_frames
 
         frame_idx = int(slider_frame.value)
-        selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
 
         for client in server.get_clients().values():
             scale = gui_res_scale.value
             browser_aspect = client.camera.aspect
-            if not gui_free_roam.value:
-                render_w = int(selected_cam.image_width * scale)
-                render_h = int(selected_cam.image_height * scale)
-                
-                # 实例化我们的纯净相机
-                view_cam = RenderCam(selected_cam)
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                
-                c2w_gl = get_c2w(selected_cam)
-                client.camera.position = c2w_gl[:3, 3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
-                
-                out = render(view_cam, gaussians, pipe, background)
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+            frame_idx = int(slider_frame.value)
+            
+            u = gui_cam_interp.value
+            idx_A = int(math.floor(u))
+            idx_B = min(idx_A + 1, max_cams - 1)
+            alpha = u - idx_A
+            
+            cam_A = view_cams[idx_A][frame_idx % len(view_cams[idx_A])]
+            cam_B = view_cams[idx_B][frame_idx % len(view_cams[idx_B])]
+            
+            c2w_A = get_c2w(cam_A)
+            c2w_B = get_c2w(cam_B)
+            
+            pos_interp = (1.0 - alpha) * c2w_A[:3, 3] + alpha * c2w_B[:3, 3]
+            
+            q_A = tf.SO3.from_matrix(c2w_A[:3, :3]).wxyz
+            q_B = tf.SO3.from_matrix(c2w_B[:3, :3]).wxyz
+            q_interp = slerp(q_A, q_B, alpha)
+            R_interp = tf.SO3(q_interp).as_matrix()
 
-                render_aspect = render_w / render_h
-                if browser_aspect > render_aspect:
-                    canvas_h = render_h
-                    canvas_w = int(render_h * browser_aspect)
-                else:
-                    canvas_w = render_w
-                    canvas_h = int(render_w / browser_aspect)
+            c2w_interp_gl = np.eye(4, dtype=np.float32)
+            c2w_interp_gl[:3, :3] = R_interp
+            c2w_interp_gl[:3, 3] = pos_interp
 
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - render_h) // 2
-                x0 = (canvas_w - render_w) // 2
-                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
-
-                client.scene.set_background_image(canvas, format="png")
-
+            c2w_interp_cv = c2w_interp_gl.copy()
+            c2w_interp_cv[:, 1:3] *= -1 
+            
+            w2c_interp_cv = np.linalg.inv(c2w_interp_cv)
+            wvt = torch.tensor(w2c_interp_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
+            
+            fovy_interp = (1.0 - alpha) * cam_A.FoVy + alpha * cam_B.FoVy
+            fovx_interp = (1.0 - alpha) * cam_A.FoVx + alpha * cam_B.FoVx
+            
+            render_h = int(cam_A.image_height * scale)
+            render_w = int(cam_A.image_width * scale)
+            
+            if cam_A.cx > 0:
+                proj= getProjectionMatrixCenterShift(0.1, 100.0, cam_A.cx, cam_A.cy, cam_A.fl_x, cam_A.fl_y, cam_A.image_width, cam_A.image_height).transpose(0,1)
             else:
-                frame_idx = int(slider_frame.value)
-                
-                u = gui_cam_interp.value
-                idx_A = int(math.floor(u))
-                idx_B = min(idx_A + 1, max_cams - 1)
-                alpha = u - idx_A
-                
-                cam_A = view_cams[idx_A][frame_idx % len(view_cams[idx_A])]
-                cam_B = view_cams[idx_B][frame_idx % len(view_cams[idx_B])]
-                
-                c2w_A = get_c2w(cam_A)
-                c2w_B = get_c2w(cam_B)
-                
-                pos_interp = (1.0 - alpha) * c2w_A[:3, 3] + alpha * c2w_B[:3, 3]
-                
-                q_A = tf.SO3.from_matrix(c2w_A[:3, :3]).wxyz
-                q_B = tf.SO3.from_matrix(c2w_B[:3, :3]).wxyz
-                q_interp = slerp(q_A, q_B, alpha)
-                R_interp = tf.SO3(q_interp).as_matrix()
+                if cam_A.cyr != 0.0 :
+                    proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp, cx=cam_A.cxr, cy=cam_A.cyr).transpose(0,1)
+                else: 
+                    proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp).transpose(0,1)
+            
+            view_cam = RenderCam(cam_A) 
+            view_cam.image_width = render_w
+            view_cam.image_height = render_h
+            view_cam.FoVx = fovx_interp
+            view_cam.FoVy = fovy_interp
+            view_cam.world_view_transform = wvt
+            view_cam.projection_matrix = proj.cuda()
+            view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
+            view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
 
-                c2w_interp_gl = np.eye(4, dtype=np.float32)
-                c2w_interp_gl[:3, :3] = R_interp
-                c2w_interp_gl[:3, 3] = pos_interp
+            view_cam.PrintSelfInfo()
 
-                c2w_interp_cv = c2w_interp_gl.copy()
-                c2w_interp_cv[:, 1:3] *= -1 
-                
-                w2c_interp_cv = np.linalg.inv(c2w_interp_cv)
-                wvt = torch.tensor(w2c_interp_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
-                
-                fovy_interp = (1.0 - alpha) * cam_A.FoVy + alpha * cam_B.FoVy
-                fovx_interp = (1.0 - alpha) * cam_A.FoVx + alpha * cam_B.FoVx
-                
-                render_h = int(cam_A.image_height * scale)
-                render_w = int(cam_A.image_width * scale)
-                
-                if cam_A.cx > 0:
-                    proj= getProjectionMatrixCenterShift(0.1, 100.0, cam_A.cx, cam_A.cy, cam_A.fl_x, cam_A.fl_y, cam_A.image_width, cam_A.image_height).transpose(0,1)
-                else:
-                    if cam_A.cyr != 0.0 :
-                        proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp, cx=cam_A.cxr, cy=cam_A.cyr).transpose(0,1)
-                    else: 
-                        proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp).transpose(0,1)
-                
-                view_cam = RenderCam(cam_A) 
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                view_cam.FoVx = fovx_interp
-                view_cam.FoVy = fovy_interp
-                view_cam.world_view_transform = wvt
-                view_cam.projection_matrix = proj.cuda()
-                view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
-                view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
+            client.camera.position = pos_interp
+            client.camera.wxyz = q_interp
+            client.camera.fov = fovy_interp
+            
+            active_mask = None
+            if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
+                active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
+                if hasattr(gaussians, '_mask_dynamic'):
+                    active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
 
-                view_cam.PrintSelfInfo()
+            try:
+                out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
+            except TypeError:
+                out = render(view_cam, gaussians, pipe, background)
 
-                client.camera.position = pos_interp
-                client.camera.wxyz = q_interp
-                client.camera.fov = fovy_interp
-                
-                active_mask = None
-                if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                    active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
-                    if hasattr(gaussians, '_mask_dynamic'):
-                        active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
+            img = torch.clamp(out["render"], 0, 1)
+            img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
 
-                try:
-                    out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-                except TypeError:
-                    out = render(view_cam, gaussians, pipe, background)
+            render_aspect = view_cam.image_width / view_cam.image_height
+            if browser_aspect > render_aspect:
+                canvas_h = view_cam.image_height
+                canvas_w = int(view_cam.image_height * browser_aspect)
+            else:
+                canvas_w = view_cam.image_width
+                canvas_h = int(view_cam.image_width / browser_aspect)
 
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+            y0 = (canvas_h - view_cam.image_height) // 2
+            x0 = (canvas_w - view_cam.image_width) // 2
+            canvas[y0:y0+view_cam.image_height, x0:x0+view_cam.image_width] = img_np
 
-                render_aspect = view_cam.image_width / view_cam.image_height
-                if browser_aspect > render_aspect:
-                    canvas_h = view_cam.image_height
-                    canvas_w = int(view_cam.image_height * browser_aspect)
-                else:
-                    canvas_w = view_cam.image_width
-                    canvas_h = int(view_cam.image_width / browser_aspect)
-
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - view_cam.image_height) // 2
-                x0 = (canvas_w - view_cam.image_width) // 2
-                canvas[y0:y0+view_cam.image_height, x0:x0+view_cam.image_width] = img_np
-
-                client.scene.set_background_image(canvas, format="png")
+            client.scene.set_background_image(canvas, format="png")
 
         time.sleep(0.01)
 
