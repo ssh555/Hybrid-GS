@@ -73,8 +73,18 @@ class TrainerSWinGS(Trainer4DGS):
         total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
         
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
-            gt_image, viewpoint_cam = batch_data
-            gt_image = gt_image.cuda()
+            # 🌟🌟🌟 核心修复区：安全提取并挂载 CUDA 🌟🌟🌟
+            if isinstance(batch_data, tuple):
+                gt_image, viewpoint_cam = batch_data
+            else:
+                gt_image, viewpoint_cam = None, batch_data
+                
+            if gt_image is not None and hasattr(gt_image, 'cuda'):
+                gt_image = gt_image.cuda()
+                
+            if hasattr(viewpoint_cam, 'cuda'):
+                viewpoint_cam = viewpoint_cam.cuda()
+            # 🌟🌟🌟 核心修复区结束 🌟🌟🌟
             
             # 优先从文件名中精准提取真实帧号
             try:
@@ -98,12 +108,13 @@ class TrainerSWinGS(Trainer4DGS):
             image = torch.clamp(render_pkg["render"], 0.0, 1.0)
             
             # 4. 计算指标 (复用原版公式)
-            total_psnr += psnr(image, gt_image).mean().item()
-            total_ssim += ssim(image, gt_image).mean().item()
+            if gt_image is not None:
+                total_psnr += psnr(image, gt_image).mean().item()
+                total_ssim += ssim(image, gt_image).mean().item()
             total_fps += fps
             
-        avg_psnr = total_psnr / len(test_cameras)
-        avg_ssim = total_ssim / len(test_cameras)
+        avg_psnr = total_psnr / len(test_cameras) if total_psnr > 0 else 0
+        avg_ssim = total_ssim / len(test_cameras) if total_ssim > 0 else 0
         avg_fps = total_fps / len(test_cameras)
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
