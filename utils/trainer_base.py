@@ -20,23 +20,19 @@ class BaseTrainer:
 
         # 动态填补 total_frames 属性，严格解析 camxx_xxxx 命名规范
         if not hasattr(self.dataset, 'total_frames'):
-            img_path = os.path.join(self.dataset.source_path, self.dataset.images)
-            img_files = glob.glob(os.path.join(img_path, "*"))
-            max_frame = 0
-            for f in img_files:
-                basename = os.path.basename(f)
-                name_without_ext = os.path.splitext(basename)[0]
-                try:
-                    # 解析 camxx_xxxx 中的第二部分 xxxx
-                    parts = name_without_ext.split('_')
-                    if len(parts) >= 2:
-                        frame_idx = int(parts[-1])
-                        if frame_idx > max_frame:
-                            max_frame = frame_idx
-                except ValueError:
-                    continue
-            self.dataset.total_frames = max_frame + 1
-            print(f"\n[数据注入] 🎯 成功解析 camxx_xxxx 规范，绑定真实总帧数: {self.dataset.total_frames}")
+            cam00_path = os.path.join(self.dataset.source_path, self.dataset.images, 'cam00')
+            # 直接使用 scandir 统计文件总数
+            try:
+                # 只统计文件(is_file)，排除子文件夹（如果有的话）
+                with os.scandir(cam00_path) as entries:
+                    file_count = sum(1 for entry in entries if entry.is_file())
+                
+                self.dataset.total_frames = file_count
+                print(f"\n[数据注入] ⚡ 通过 os.scandir 快速统计 cam00，判定总帧数: {self.dataset.total_frames}")
+                
+            except FileNotFoundError:
+                self.dataset.total_frames = 1
+                print(f"\n[数据注入] ⚠️ 警告：找不到目录 {cam00_path}，设为默认值 1")
 
         # 实例化统一的单例监控记录仪
         self.metrics_tracker = MetricsTracker()

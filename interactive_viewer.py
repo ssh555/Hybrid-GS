@@ -90,7 +90,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         rot_4d=args.rot_4d,
         force_sh_3d=args.force_sh_3d
     )
-
     scene = Scene(dataset, gaussians, shuffle=False)
     train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
     
