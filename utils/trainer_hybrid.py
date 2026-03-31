@@ -20,11 +20,9 @@ class TrainerHybrid(TrainerSWinGS):
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
         self.use_mc = getattr(args, 'use_mc_sampling', True)
-
     def robust_hard_constraint_classifier(self):
-        """核心机制：鲁棒硬约束判定，将低位移高斯永久冻结为静态背景"""
+        """核心机制：自适应相对硬约束判定 (Scale-Invariant)"""
         with torch.no_grad():
-            # 🚀 修复用户发现的盲点：结合 SWinGS，只提取“当前窗口活着”的动态点
             if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                 alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
             else:
@@ -36,29 +34,49 @@ class TrainerHybrid(TrainerSWinGS):
             
             t_base = self.gaussians.get_t
             
-            # 🌟 接入消融开关：MC 采样 vs 传统双点采样
+            if hasattr(self, 'total_frames') and self.total_frames > 0:
+                max_dt = 5.0 / self.total_frames 
+            else:
+                max_dt = 0.02
+                
             if self.use_mc:
                 num_samples = 8
-                dt_steps = torch.linspace(0.1, 1.0, steps=num_samples, device="cuda").unsqueeze(-1)
+                dt_steps = torch.linspace(0.001, max_dt, steps=num_samples, device="cuda").unsqueeze(-1)
             else:
                 num_samples = 2
-                dt_steps = torch.tensor([0.05, 1.0], device="cuda").unsqueeze(-1)
+                dt_steps = torch.tensor([0.005, max_dt], device="cuda").unsqueeze(-1)
             
             displacement_list = []
             for i in range(num_samples):
-                _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_base + dt_steps[i], mask=dynamic_mask)
+                eval_t = torch.clamp(t_base + dt_steps[i], 0.0, 1.0)
+                _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, eval_t, mask=dynamic_mask)
                 displacement_list.append(v.norm(dim=-1))
             
             all_displacements = torch.stack(displacement_list, dim=1)
             r_avg = all_displacements.mean(dim=1)
             r_max = all_displacements.max(dim=1)[0]
             
-            is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
+            # ==========================================================
+            # 🌟 核心升级：自适应相对阈值 (Scale-Invariant)
+            # ==========================================================
+            # 1. 计算当前场景的平均运动幅度
+            scene_mean_movement = r_avg.mean().item()
+            
+            # 2. 假设背景的运动幅度应该远低于整体平均值 (比如只有平均值的 30%)
+            # 我们同时设一个极宽容的绝对上限 (1.0)，防止把停止跳舞的 Miku 也冻结了
+            adaptive_tau = min(scene_mean_movement * 0.3, 1.0)
+            adaptive_tau_max = adaptive_tau * 2.0
+            
+            # 3. 使用自适应阈值进行判定
+            is_static = (r_avg < adaptive_tau) & (r_max < adaptive_tau_max)
             
             if is_static.any():
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
                 self.gaussians._mask_dynamic[global_static_indices] = 1
                 self.gaussians._t.data[global_static_indices] = 0.0
+                
+                # 打印情报，让你对当前模型的“空间尺度”了如指掌！
+                print(f"\n❄️ [硬约束触发] 场景均值位移: {scene_mean_movement:.4f} | 自适应阈值: < {adaptive_tau:.4f} | 成功冻结了 {global_static_indices.numel()} 个点!")
 
     def train(self):
         print(f"\n[TrainerHybrid] 开始终极混合训练！已激活软硬双重约束。")
@@ -154,18 +172,21 @@ class TrainerHybrid(TrainerSWinGS):
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
 
                 # =========================================================
-                # 3. HybridGS 软硬双重约束 (完全消融解耦，且防爆)
+                # 3. 终极修复：统一 HybridGS 软硬双重约束 (完全消融解耦，防爆，防时间穿梭)
                 # =========================================================
                 total_reg_loss = 0.0  
+                
+                # 🌟 修复：严格使用当前真实帧号的归一化时间
+                current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
 
-                # --- 软约束 ---
+                # --- 软约束模块 (控制动态点的平滑度与 KNN 刚性) ---
                 if self.use_soft:
                     warmup_start, warmup_end = 10000, 20000
                     if iteration < warmup_start: current_lambda_d = 0.0
                     elif iteration > warmup_end: current_lambda_d = self.lambda_d
                     else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
 
-                    if current_lambda_d > 0:
+                    if current_lambda_d > 0 or self.opt.lambda_rigid > 0:
                         if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                             alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
                         else:
@@ -175,7 +196,7 @@ class TrainerHybrid(TrainerSWinGS):
                         active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
                         
                         if active_indices.numel() > 0:
-                            # ⚠️ 绝对防爆机制：强制切断与 use_mc 的关联，永远最多只采样 30000 点进行 MLP 推理！
+                            # 绝对防爆：强制最多只抽 30,000 点
                             if active_indices.numel() > 30000:
                                 perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
                                 active_indices = active_indices[perm]
@@ -183,15 +204,29 @@ class TrainerHybrid(TrainerSWinGS):
                                 sampled_mask[active_indices] = True
                                 active_dynamic_mask = sampled_mask
 
-                            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=active_dynamic_mask)
-                            total_reg_loss += current_lambda_d * velocity.norm(p=2, dim=1).mean()
+                            # 正确使用 current_t 算速度！
+                            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
+                            
+                            if current_lambda_d > 0:
+                                total_reg_loss += current_lambda_d * velocity.norm(p=2, dim=1).mean()
 
-                # --- 硬约束 ---
+                            # KNN 刚性约束
+                            if self.opt.lambda_rigid > 0 and active_indices.numel() > 10:
+                                k_neighbors = 10
+                                xyz_dynamic = self.gaussians.get_xyz[active_dynamic_mask].contiguous()
+                                idx, dist = knn(xyz_dynamic[None].detach(), xyz_dynamic[None].detach(), k_neighbors)
+                                weight = torch.exp(-100 * dist)
+                                vel_dist = torch.norm(velocity[idx.squeeze(0)] - velocity.unsqueeze(1), p=2, dim=-1)
+                                coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
+                                total_reg_loss += self.opt.lambda_rigid * 5.0 * coherence_loss
+
+                # --- 硬约束模块 (用 10.0 的权重严厉惩罚被冻结点的任何微小运动) ---
                 if self.use_hard:
                     static_mask = (self.gaussians._mask_dynamic == 1)
                     if static_mask.any():
                         static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                        # ⚠️ 绝对防爆机制：强制切断与 use_mc 的关联！
+                        
+                        # 绝对防爆：强制最多只抽 30,000 点
                         if static_indices.numel() > 30000:
                             perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
                             static_indices = static_indices[perm]
@@ -199,17 +234,16 @@ class TrainerHybrid(TrainerSWinGS):
                             sampled_static_mask[static_indices] = True
                             static_mask = sampled_static_mask
 
-                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, self.gaussians.get_t + 1.0, mask=static_mask)
+                        # 正确使用 current_t！
+                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=static_mask)
                         total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
 
                 # =========================================================
-                # 4. 统一反向传播 (剔除双重 Backward 的性能毒瘤)
+                # 4. 统一反向传播 (剔除性能毒瘤，全场唯一的 Backward!)
                 # =========================================================
-                if isinstance(total_reg_loss, torch.Tensor):
-                    current_loss = current_loss + total_reg_loss
-                    
+                current_loss = current_loss + total_reg_loss
                 current_loss = current_loss / batch_size
-                current_loss.backward()  # <--- 整个循环只允许有这一个 backward！
+                current_loss.backward()  # <--- 唯一下达梯度指令的地方
                 loss += current_loss.item()
                 
                 # 5. 梯度收集 (维持你写好的静动态点分离逻辑)
