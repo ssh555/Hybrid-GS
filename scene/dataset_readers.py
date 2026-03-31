@@ -125,20 +125,43 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     sys.stdout.write('\n')
     return cam_infos
 
+# def fetchPly(path):
+#     plydata = PlyData.read(path)
+#     vertices = plydata['vertex']
+#     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+#     colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+#     if 'nx' in vertices:
+#         normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+#     else:
+#         normals = np.zeros_like(positions)
+#     if 'time' in vertices:
+#         timestamp = vertices['time'][:, None]
+#     else:
+#         timestamp = None
+#     return BasicPointCloud(points=positions, colors=colors, normals=normals, time=timestamp)
 def fetchPly(path):
-    plydata = PlyData.read(path)
-    vertices = plydata['vertex']
-    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    if 'nx' in vertices:
-        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    else:
-        normals = np.zeros_like(positions)
-    if 'time' in vertices:
-        timestamp = vertices['time'][:, None]
-    else:
-        timestamp = None
-    return BasicPointCloud(points=positions, colors=colors, normals=normals, time=timestamp)
+    import open3d as o3d
+    import numpy as np
+    try:
+        print(f"🚛 正在使用 Open3D 强行读取 PLY: {path}")
+        pcd_o3d = o3d.io.read_point_cloud(path)
+        
+        positions = np.asarray(pcd_o3d.points)
+        colors = np.asarray(pcd_o3d.colors)
+        normals = np.asarray(pcd_o3d.normals)
+        
+        # 容错处理
+        if positions.shape[0] == 0:
+            return None
+        if colors.shape[0] == 0:
+            colors = np.ones_like(positions) * 0.5
+        if normals.shape[0] == 0:
+            normals = np.zeros_like(positions)
+            
+        return BasicPointCloud(points=positions, colors=colors, normals=normals, time=None)
+    except Exception as e:
+        print(f"❌ Open3D 读取失败: {e}")
+        return None
 
 def storePly(path, xyz, rgb):
     # Define the dtype for the structured array
@@ -346,7 +369,8 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
     try:
         pcd = fetchPly(ply_path)
-    except:
+    except Exception as e:
+        print(f"Error occurred while fetching PLY file: {e}")
         pcd = None
 
     if pcd.points.shape[0] > num_pts:
