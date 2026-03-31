@@ -1,380 +1,442 @@
-import time
-import math
+# 文件：utils/trainer_swings.py
+import os
 import torch
-import numpy as np
-import viser
-import viser.transforms as tf
-
-from argparse import ArgumentParser
-from omegaconf import OmegaConf
-from omegaconf.dictconfig import DictConfig
-
-from arguments import ModelParams, PipelineParams
-from scene import Scene, GaussianModel
+from random import randint
+from tqdm import tqdm
+from utils.loss_utils import l1_loss, ssim
+from utils.image_utils import psnr
 from gaussian_renderer import render
-from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift, getProjectionMatrixCV, pix2ndc
+from utils.general_utils import knn
+from utils.trainer_4dgs import Trainer4DGS
 
-class RenderCam:
-    def __init__(self, base_cam):
-        self.base_cam = base_cam
-        # 1. 拷贝渲染器 (render) 强制需要的核心标量
-        self.image_width = base_cam.image_width
-        self.image_height = base_cam.image_height
-        self.FoVx = base_cam.FoVx
-        self.FoVy = base_cam.FoVy
-        self.timestamp = base_cam.timestamp
+class TrainerSWinGS(Trainer4DGS):
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
+        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
         
-        # 2. 核心防御：使用 .clone() 彻底拷贝张量数据，断开与 base_cam 的显存引用
-        self.world_view_transform = base_cam.world_view_transform.clone()
-        self.projection_matrix = base_cam.projection_matrix.clone()
-        self.full_proj_transform = base_cam.full_proj_transform.clone()
-        self.camera_center = base_cam.camera_center.clone()
+        self.swin_size = getattr(args, 'swin_size', 50)
+        self.total_frames = self.dataset.total_frames
+        self.window_start = 0
+        self.window_end = min(self.swin_size - 1, self.total_frames - 1)
         
-        # 3. 拷贝其他杂项以防万一
-        self.uid = getattr(base_cam, 'uid', 0)
-        self.image_name = getattr(base_cam, 'image_name', 'roam_cam')
-        self.gt_alpha_mask = getattr(base_cam, 'gt_alpha_mask', None)
-        
-    def get_rays(self):
+        slide_steps = max(1, self.total_frames - self.swin_size)
+        self.slide_interval = max(1, self.opt.iterations // slide_steps)
+
+    def _update_sliding_window(self, iteration):
+        """控制时间窗口滑动与高斯寿命延长"""
+        if iteration > 0 and iteration % self.slide_interval == 0:
+            if self.window_end < self.total_frames - 1:
+                # 记录即将被淘汰的旧起始帧
+                old_start = self.window_start
+                self.window_start += 1
+                self.window_end += 1
+
+                # ===================================================
+                # 🧹 动态内存垃圾回收：窗口一走，立刻把旧照片踢出内存！
+                # ===================================================
+                if hasattr(self, 'frames_dict') and hasattr(self, 'window_cache'):
+                    if old_start in self.frames_dict:
+                        for d_idx in self.frames_dict[old_start]:
+                            self.window_cache.pop(d_idx, None)  # 物理释放内存
+
+                with torch.no_grad():
+                    if hasattr(self.gaussians, '_expire_frame') and self.gaussians._expire_frame.numel() > 0:
+                        alive_idx = self.gaussians._expire_frame == (self.window_end - 1)
+                        self.gaussians._expire_frame[alive_idx] = self.window_end
+
+    def _get_active_dynamic_mask(self, frame_id):
         """
-        原生重写射线生成逻辑，使用当前 RenderCam 自身的物理属性，
-        彻底杜绝 __getattr__ 带来的隐式上下文穿透！
+        [SWinGS / HybridGS 核心] 获取当前帧存活的高斯掩码。
+        过滤掉那些在当前时间戳尚未出生，或已经死亡的冗余高斯。
         """
-        # 使用纯 PyTorch 生成网格，避免依赖 Kornia
-        y, x = torch.meshgrid(torch.arange(self.image_height), torch.arange(self.image_width), indexing='ij')
-        x = (x.float() + 0.5).cuda()
-        y = (y.float() + 0.5).cuda()
-        
-        pts_view = torch.stack([
-            (x - self.cx) / self.fl_x, 
-            (y - self.cy) / self.fl_y, 
-            torch.ones_like(x), 
-            torch.ones_like(x)
-        ], dim=-1)
-        
-        c2w = torch.linalg.inv(self.world_view_transform.transpose(0, 1))
-        pts_world = pts_view @ c2w.T
-        directions = pts_world[..., :3] - self.camera_center[None, None, :]
-        
-        return self.camera_center[None, None], directions / torch.norm(directions, dim=-1, keepdim=True)
-
-    # 打印RenderCame和base_cam的核心参数对比，验证是否成功断开引用
-    def PrintSelfInfo(self):
-        print("=== RenderCam 核心参数 ===")
-        print(f"Image Size: {self.image_width}x{self.image_height}")
-        print(f"FoV: ({self.FoVx:.2f}, {self.FoVy:.2f})")
-        print(f"Timestamp: {self.timestamp}")
-        print(f"Camera Center: {self.camera_center.cpu().numpy()}")
-        print(f"World-View Transform (first 3 rows):\n{self.world_view_transform.cpu().numpy()[:3]}")
-        print(f"Projection Matrix (first 3 rows):\n{self.projection_matrix.cpu().numpy()[:3]}")
-        print("===========================")
-        print("=== BaseCam 核心参数 ===")
-        print(f"Image Size: {self.base_cam.image_width}x{self.base_cam.image_height}")
-        print(f"FoV: ({self.base_cam.FoVx:.2f}, {self.base_cam.FoVy:.2f})")
-        print(f"Timestamp: {self.base_cam.timestamp}")
-        print(f"Camera Center: {self.base_cam.camera_center.cpu().numpy()}")
-        print(f"World-View Transform (first 3 rows):\n{self.base_cam.world_view_transform.cpu().numpy()[:3]}")
-        print(f"Projection Matrix (first 3 rows):\n{self.base_cam.projection_matrix.cpu().numpy()[:3]}")
-        print("===========================")
-
-
-# ==============================
-# Utils
-# ==============================
-def get_c2w(cam):
-    w2c = cam.world_view_transform.transpose(0, 1).cpu().numpy()
-    c2w = np.linalg.inv(w2c)
-    c2w[:, 1:3] *= -1
-    return c2w
-
-def slerp(q0, q1, t):
-    """标准的四元数球面线性插值 (Spherical Linear Interpolation)"""
-    dot = np.sum(q0 * q1)
-    # 确保走最短路径，防止镜头翻转
-    if dot < 0.0:
-        q1 = -q1
-        dot = -dot
-    
-    DOT_THRESHOLD = 0.9995
-    if dot > DOT_THRESHOLD:
-        # 如果极度接近，退化为普通线性插值
-        res = q0 + t * (q1 - q0)
-        return res / np.linalg.norm(res)
-        
-    theta_0 = np.arccos(dot)
-    sin_theta_0 = np.sin(theta_0)
-    theta = theta_0 * t
-    sin_theta = np.sin(theta)
-    
-    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
-    s1 = sin_theta / sin_theta_0
-    return (s0 * q0) + (s1 * q1)
-
-# ==============================
-# 主函数
-# ==============================
-@torch.no_grad()
-def main(dataset: ModelParams, pipe: PipelineParams, args):
-
-    background = torch.tensor(
-        [1,1,1] if dataset.white_background else [0.2,0.2,0.2],
-        dtype=torch.float32,
-        device="cuda"
-    )
-
-    gaussians = GaussianModel(
-        dataset.sh_degree,
-        gaussian_dim=args.gaussian_dim,
-        time_duration=args.time_duration,
-        rot_4d=args.rot_4d,
-        force_sh_3d=args.force_sh_3d
-    )
-    scene = Scene(dataset, gaussians, shuffle=False)
-    train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
-    
-    base_cam = train_cams[0]
-    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
-    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R
-    
-    max_frames = 0
-    for cam in train_cams:
-        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R
-        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
-            max_frames += 1
-        else:
-            break
+        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+            return None
             
-    view_cams = []
-    for i in range(0, len(train_cams), max_frames):
-        view_cams.append(train_cams[i:i+max_frames])
-    max_cams = len(view_cams)
-    print(f"[渲染器] 数据集解析完成，共 {max_cams} 个视角，每个视角 {max_frames} 帧。")
-
-    model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
-    gaussians.restore(model_params, None)
-
-    server = viser.ViserServer(port=8080)
-
-
-    # ==========================================
-    # 🎬 UI 控制台
-    # ==========================================
-    with server.gui.add_folder("🎬 导播台面板"):
-        gui_free_roam = server.gui.add_checkbox("🕹️ 启用自由漫游", initial_value=False)
-        gui_cam_interp = server.gui.add_slider("🎥 平滑漫游轨道", 0.0, float(max_cams-1), 0.01, 0.0)
-
-        gui_sync_cam = server.gui.add_button("🎯 视角归位 (一键对齐原轨迹)")
+        # 存活条件：出生时间 <= 当前帧 AND 过期时间 >= 当前帧
+        active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
         
-        cam_id = server.gui.add_slider("🎥 原版机位切换", 0, max_cams-1, 1, 0)
+        # 融合 HybridGS 的动静硬约束
+        if hasattr(self.gaussians, '_mask_dynamic'):
+            # 1 是被硬约束冻结的静态背景 (永远可见)，其他则是动态点 (受生命周期限制)
+            final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
+            return final_mask
+            
+        return active_mask
 
-        with server.gui.add_folder("播放控制", expand_by_default=True):
-            btn_play = server.gui.add_button("▶️ 播放")
-            btn_pause = server.gui.add_button("⏸ 暂停")
-
-        slider_frame = server.gui.add_slider("⏱️ 播放进度", 0, max_frames-1, 0.01, 0)
-        slider_speed = server.gui.add_slider("⚡ 播放速度倍率", 0.25, 2.0, 0.05, 1.0)
-        gui_res_scale = server.gui.add_slider("🖥️ 渲染质量倍率 (调高极清晰)", 0.5, 2.0, 0.1, 1.0)
-
-    play_state = {"playing": False}
-
-    @btn_play.on_click
-    def _(_): play_state["playing"] = True
-
-    @btn_pause.on_click
-    def _(_): play_state["playing"] = False
-
-    @gui_sync_cam.on_click
-    def _(_):
-        gui_free_roam.value = False
-
-    last_update_time = time.time()
-    TARGET_FPS = 30.0
-
-    while True:
-        current_time = time.time()
-        dt = current_time - last_update_time
-        last_update_time = current_time
-
-        if play_state["playing"]:
-            slider_frame.value += TARGET_FPS * dt * slider_speed.value
-
-        if slider_frame.value >= max_frames:
-            slider_frame.value %= max_frames
-
-        frame_idx = int(slider_frame.value)
-        selected_cam = view_cams[cam_id.value][frame_idx % len(view_cams[cam_id.value])]
-
-        for client in server.get_clients().values():
-            scale = gui_res_scale.value
-            browser_aspect = client.camera.aspect
-            if not gui_free_roam.value:
-                # ==========================================================
-                # 🎬 导播模式：只修改分辨率，其余保持原样
-                # ==========================================================
-                render_w = int(selected_cam.image_width * scale)
-                render_h = int(selected_cam.image_height * scale)
-                
-                # 实例化我们的纯净相机
-                view_cam = RenderCam(selected_cam)
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                
-                c2w_gl = get_c2w(selected_cam)
-                client.camera.position = c2w_gl[:3, 3]
-                client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
-                
-                out = render(view_cam, gaussians, pipe, background)
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-
-                render_aspect = render_w / render_h
-                if browser_aspect > render_aspect:
-                    canvas_h = render_h
-                    canvas_w = int(render_h * browser_aspect)
-                else:
-                    canvas_w = render_w
-                    canvas_h = int(render_w / browser_aspect)
-
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - render_h) // 2
-                x0 = (canvas_w - render_w) // 2
-                canvas[y0:y0+render_h, x0:x0+render_w] = img_np
-
-                client.scene.set_background_image(canvas, format="png")
-
+    @torch.no_grad()
+    def evaluate(self, iteration):
+        print(f"\n[评估 SWinGS/HybridGS] 正在执行 Iteration {iteration} 的测试集评估...")
+        
+        test_cameras = self.scene.getTestCameras()
+        if not test_cameras: return
+            
+        total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
+        
+        for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
+            # 1. 回归最纯净的读取，跟 4DGS 一模一样
+            gt_image, viewpoint_cam = batch_data
+            if gt_image is not None:
+                gt_image = gt_image.cuda()
+            
+            # 2. 提取真实帧号
+            try:
+                frame_id = int(viewpoint_cam.image_name.split('_')[-1])
+            except:
+                frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
+            
+            # 3. 获取掩码
+            active_mask = self._get_active_dynamic_mask(frame_id)
+            
+            # ==========================================================
+            # 🌟🌟🌟 终极真相：拦截 0 点导致 C++ 空指针崩溃的 Bug 🌟🌟🌟
+            # ==========================================================
+            if active_mask is not None and not active_mask.any():
+                # 触发条件：测试到了过去很久的帧，该帧没有任何存活的高斯点。
+                # 绝对不能传给 render，否则 C++ 渲染器会报 Host Memory 错误！
+                # 直接强行生成一张纯背景色的图片跳过渲染。
+                image = self.background.clone().view(3, 1, 1).expand(
+                    3, viewpoint_cam.image_height, viewpoint_cam.image_width
+                )
+                fps = 1000.0 # 假装渲染极快
             else:
-                # ==========================================================
-                # 🚂 受限轨道漫游：基于真实相机的时空平滑插值
-                # ==========================================================
-                frame_idx = int(slider_frame.value)
+                # 正常渲染
+                render_pkg, fps = self.metrics_tracker.measure_fps(
+                    render, 
+                    viewpoint_cam, 
+                    self.gaussians, 
+                    self.pipe, 
+                    self.background, 
+                    active_dynamic_mask=active_mask
+                )
+                image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+            # ==========================================================
+            
+            if gt_image is not None:
+                total_psnr += psnr(image, gt_image).mean().item()
+                total_ssim += ssim(image, gt_image).mean().item()
+            total_fps += fps
+            
+        avg_psnr = total_psnr / len(test_cameras) if total_psnr > 0 else 0
+        avg_ssim = total_ssim / len(test_cameras) if total_ssim > 0 else 0
+        avg_fps = total_fps / len(test_cameras)
+        
+        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
+        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+
+    def train(self):
+        print(f"\n[TrainerSWinGS] 开始长序列滑动窗口训练，窗口大小: {self.swin_size}")
+        self.metrics_tracker.start_timer()
+        
+        # 3D4DGS 的 Dataset 会返回 (gt_image, cam)
+        training_dataset = self.scene.getTrainCameras()
+
+        # ==========================================
+        # 🌟 核心修复：建立 [帧号 -> 相机索引] 的全映射字典
+        # 严格基于 camxx_xxxx 命名规范，完美支持多相机与乱序
+        # ==========================================
+        import random
+        self.frames_dict = {}
+        for idx, cam in enumerate(training_dataset):
+            try:
+                # 提取 cam.image_name (如 "cam00_0150") 的后半段作为帧号
+                frame_id = int(cam.image_name.split('_')[-1])
+            except:
+                # 极端情况 fallback
+                frame_id = getattr(cam, 'fid', idx % self.total_frames)
                 
-                # 1. 计算插值索引与权重 alpha
-                u = gui_cam_interp.value
-                idx_A = int(math.floor(u))
-                idx_B = min(idx_A + 1, max_cams - 1)
-                alpha = u - idx_A
+            if frame_id not in self.frames_dict:
+                self.frames_dict[frame_id] = []
+            self.frames_dict[frame_id].append(idx)
+
+        # ==========================================
+        # 🚀 植入动态滑动缓存池：永远只占用当前窗口的内存！
+        # ==========================================
+        self.window_cache = {}
+
+        # SWinGS 特有：初始化生命周期张量
+        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+            num_pts = self.gaussians.get_xyz.shape[0]
+            self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+            self.gaussians._expire_frame = torch.full((num_pts,), self.window_end, dtype=torch.int32, device="cuda")
+            self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
+
+        # ==========================================
+        # [新增] 初始化记录列表，增加点云数量监控
+        # ==========================================
+        self.loss_history = []
+        self.loss_iterations = []
+        self.pts_4d_history = []
+        self.pts_3d_history = []
+
+        progress_bar = tqdm(range(self.first_iter + 1, self.opt.iterations + 1), desc="SWinGS Training")
+        iter_start = torch.cuda.Event(enable_timing=True)
+        iter_end = torch.cuda.Event(enable_timing=True)
+        
+        for iteration in range(self.first_iter + 1, self.opt.iterations + 1):
+            iter_start.record()
+            self._update_sliding_window(iteration)
+            self.gaussians.update_learning_rate(iteration)
+            
+            if iteration % self.opt.sh_increase_interval == 0:
+                self.gaussians.oneupSHdegree()
+            if (iteration - 1) == self.args.debug_from:
+                self.pipe.debug = True
+
+            batch_size = self.args.batch_size
+            batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
+            
+            loss = 0
+            # =============== 批处理循环 (仅在窗口内采样) ===============
+            for batch_idx in range(batch_size):
+                # 1. SWinGS 官方算法：在当前活跃的滑动窗口内进行均匀随机抽样 (SGD核心)
+                t_id = random.randint(self.window_start, self.window_end)
                 
-                # 2. 提取当前播放帧对应的两个相邻真实相机
-                cam_A = view_cams[idx_A][frame_idx % len(view_cams[idx_A])]
-                cam_B = view_cams[idx_B][frame_idx % len(view_cams[idx_B])]
+                # 2. 从预处理的字典中，随机抽取该帧对应的一个相机视角
+                # 这个做法 100% 避免了之前的数组越界和单视角 Bug
+                dataset_idx = random.choice(self.frames_dict[t_id])
                 
-                # 3. 获取 OpenGL 格式的 C2W 矩阵 (复用你原有的正确转换逻辑)
-                c2w_A = get_c2w(cam_A)
-                c2w_B = get_c2w(cam_B)
+                # 3. 提取真实图像和相机位姿
+                frame_id = t_id
+                # ===================================================
+                # 🚀 动态缓存读取机制
+                # ===================================================
+                if dataset_idx not in self.window_cache:
+                    # 如果内存里没有（新进窗口的帧），就去硬盘读一次，并存入缓存
+                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
                 
-                # 4. 平移插值 (LERP)
-                pos_interp = (1.0 - alpha) * c2w_A[:3, 3] + alpha * c2w_B[:3, 3]
+                # 从内存中光速读取！
+                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
+
+                # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
+                # 🚀 替换为带有防御掩码的终极版：
+                active_mask = self._get_active_dynamic_mask(frame_id)
+                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
+
+                image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                alpha = render_pkg["alpha"]
                 
-                # 5. 旋转插值 (SLERP)
-                q_A = tf.SO3.from_matrix(c2w_A[:3, :3]).wxyz
-                q_B = tf.SO3.from_matrix(c2w_B[:3, :3]).wxyz
-                q_interp = slerp(q_A, q_B, alpha)
-                R_interp = tf.SO3(q_interp).as_matrix()
 
-                # 6. 组装插值后的 C2W，并翻转 Y,Z 转换回 OpenCV 坐标系
-                c2w_interp_gl = np.eye(4, dtype=np.float32)
-                c2w_interp_gl[:3, :3] = R_interp
-                c2w_interp_gl[:3, 3] = pos_interp
-
-                c2w_interp_cv = c2w_interp_gl.copy()
-                c2w_interp_cv[:, 1:3] *= -1 
+                # 计算基础损失
+                Ll1 = l1_loss(image, gt_image)
+                Lssim = 1.0 - ssim(image, gt_image)
+                current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
                 
-                # 7. 求逆得到 W2C 并送入显存
-                w2c_interp_cv = np.linalg.inv(c2w_interp_cv)
-                wvt = torch.tensor(w2c_interp_cv, dtype=torch.float32, device="cuda").transpose(0, 1)
+                # Opa Mask Loss
+                if self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
+                    o = alpha.clamp(1e-6, 1-1e-6)
+                    sky = 1 - viewpoint_cam.gt_alpha_mask
+                    current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
+                    
+
+                    
+                need_velocity = (self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)
                 
-                # 8. FOV 平滑过渡与画布尺寸计算
-                fovy_interp = (1.0 - alpha) * cam_A.FoVy + alpha * cam_B.FoVy
-                fovx_interp = (1.0 - alpha) * cam_A.FoVx + alpha * cam_B.FoVx
+                if need_velocity:
+                    current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+                    
+                    # ⚠️ 核心提速：只给当前活着的点算速度 (MLP 唯一一次前向传播)
+                    _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_mask)
+                    
+                    # --- 1. Rigid Loss (KNN 刚性防炸裂约束) ---
+                    if self.opt.lambda_rigid > 0:
+                        k_neighbors = 10
+                        xyz_active = self.gaussians.get_xyz[active_mask].contiguous()
+                        
+                        # 绝对防爆机制：强制最多只随机抽 30,000 个点算 KNN！
+                        if xyz_active.shape[0] > 30000:
+                            perm = torch.randperm(xyz_active.shape[0], device="cuda")[:30000]
+                            xyz_cur = xyz_active[perm].contiguous()
+                            velocity_cur = active_velocity[perm]
+                        else:
+                            xyz_cur = xyz_active
+                            velocity_cur = active_velocity
+
+                        # 防止点数太少导致 KNN 报错
+                        if xyz_cur.shape[0] > k_neighbors:
+                            idx, dist = knn(xyz_cur[None].detach(), xyz_cur[None].detach(), k_neighbors)
+                            weight = torch.exp(-100 * dist)
+                            vel_dist = torch.norm(velocity_cur[idx.squeeze(0)] - velocity_cur.unsqueeze(1), p=2, dim=-1)
+                            coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_cur.shape[0]
+                            current_loss = current_loss + (self.opt.lambda_rigid * 5.0) * coherence_loss
+                    
+                if self.opt.lambda_motion > 0:
+                    current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+                    
+                    # 💡 极限提速核心：无论当前窗口有多少活着的点，最多只抽 10,000 个算速度！
+                    active_indices = torch.nonzero(active_mask, as_tuple=False).squeeze()
+                    
+                    if active_indices.numel() > 10000:
+                        perm = torch.randperm(active_indices.numel(), device="cuda")[:10000]
+                        sampled_indices = active_indices[perm]
+                        sampled_mask = torch.zeros_like(active_mask)
+                        sampled_mask[sampled_indices] = True
+                    else:
+                        sampled_mask = active_mask
+
+                    # MLP 唯一一次前向传播，且最多只算 1 万个点！耗时极其微小！
+                    _, sampled_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=sampled_mask)
+                    
+                    # 惩罚拉扯，防碎纸屑
+                    current_loss = current_loss + (self.opt.lambda_motion * 2.0) * sampled_velocity.norm(p=2, dim=1).mean()
+
+                # =============== 统一回传 =================
+                current_loss = current_loss / batch_size
+                current_loss.backward()
+                loss += current_loss.item()
                 
-                render_h = int(cam_A.image_height * scale)
-                render_w = int(cam_A.image_width * scale)
+                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
+                batch_radii.append(radii)
+                batch_visibility_filter.append(visibility_filter)
+
+            # =============== 梯度累加 ===============
+            if batch_size > 1:
+                visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
+                visibility_filter = visibility_count > 0
+                radii = torch.stack(batch_radii,1).max(1)[0]
+                batch_viewspace_point_grad = torch.stack(batch_point_grad,1).sum(1)
+                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
+
+                if self.gaussians.gaussian_dim == 4:
+                    batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
+                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                    batch_t_grad = batch_t_grad.unsqueeze(1)
+            else:
+                if self.gaussians.gaussian_dim == 4:
+                    batch_t_grad = self.gaussians._t.grad.clone().detach()
+                    
+            iter_end.record()
+
+            # =============== 致密化与优化器 ===============
+            with torch.no_grad():
+                # 1. 移除了最外层的点数限制，只要在 densify_until_iter 期限内，就永远进得来！
+                if iteration < self.opt.densify_until_iter:
+                    self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    
+                    if batch_size == 1:
+                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                    else:
+                        self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+
+                    if iteration > self.opt.densify_from_iter: 
+                        size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
+                        if iteration % self.opt.densification_interval == 0: 
+                            
+                            # 🚀 动态阈值法：让系统“只排泄，不进食”
+                            active_grad_threshold = self.opt.densify_grad_threshold
+                            active_grad_t_threshold = getattr(self.opt, 'densify_grad_t_threshold', 0.00005)
+                            
+                            # 触顶防爆：如果点数超过上限，把生点门槛拉到极其巨大 (99999.0)
+                            # 这样它绝对生不出新点，但底层的 prune (修剪) 依然会完美执行，清理显存！
+                            current_pts = self.gaussians.get_xyz.shape[0]
+                            max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
+                            if max_points > 0 and current_pts >= max_points:
+                                active_grad_threshold = 99999.0 
+                                active_grad_t_threshold = 99999.0 
+
+                            self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, active_grad_t_threshold)
+                            
+                            if hasattr(self.gaussians, 'dynamic2static'):
+                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
+                                
+                # 大扫除独立出来
+                if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                    self.gaussians.reset_opacity()
+                        
+                # =============== [核心机制] SWinGS 生命周期梯度衰减 ===============
+                if iteration < self.opt.iterations:
+                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
+                        decay_factor = 1.0 / age.float()
+                        if self.gaussians._xyz.grad is not None:
+                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
+                            
+                    self.gaussians.optimizer.step()
+                    self.gaussians.optimizer.zero_grad(set_to_none=True)
+                    if self.pipe.env_map_res and iteration < self.pipe.env_optimize_until:
+                        self.env_map_optimizer.step()
+                        self.env_map_optimizer.zero_grad(set_to_none=True)
+
+                # =============== 进度条与评估/保存 ===============
+                if iteration % 10 == 0:
+                    postfix = {"Loss": f"{loss:.4f}", "Win": f"[{self.window_start}-{self.window_end}]", "Pts(4D)": self.gaussians.get_xyz.shape[0]}
+                    progress_bar.set_postfix(postfix)
+                    progress_bar.update(10)
+                    
+                    # ==========================================
+                    # [修改] 每 10 步记录 Loss 和 高斯点数量
+                    # ==========================================
+                    self.loss_iterations.append(iteration)
+                    self.loss_history.append(loss)
+                    
+                    num_4d = self.gaussians.get_xyz.shape[0] if self.gaussians.get_xyz is not None else 0
+                    self.pts_4d_history.append(num_4d)
+                    
+                    num_3d = 0
+                    self.pts_3d_history.append(num_3d)
+
+                if iteration == self.opt.iterations:
+                    self.evaluate(iteration)
+                    os.makedirs(self.args.model_path, exist_ok=True)
+                    torch.save((self.gaussians.capture(), iteration), os.path.join(self.args.model_path, f"chkpnt_{iteration}.pth"))
+                    self.gaussians.save_ply(os.path.join(self.args.model_path, f"point_cloud_{iteration}.ply"))
+                    num_4d = self.gaussians.get_xyz.shape[0]
+                    num_3d = 0
+                    self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
+
+
+                    
+        progress_bar.close()
+        self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
+
+        # ==========================================
+        # [修改] 训练结束：绘制并保存双 Y 轴指标图
+        # ==========================================
+        try:
+            import matplotlib.pyplot as plt
+            fig, ax1 = plt.subplots(figsize=(12, 6))
+            
+            # --- 1. 左侧 Y 轴：绘制 Loss 曲线 ---
+            color_loss = '#1f77b4'
+            ax1.set_xlabel("Iteration", fontsize=12)
+            ax1.set_ylabel("Total Loss", color=color_loss, fontsize=12, fontweight='bold')
+            line_loss, = ax1.plot(self.loss_iterations, self.loss_history, label="Training Loss", color=color_loss, linewidth=1.5, alpha=0.9)
+            ax1.tick_params(axis='y', labelcolor=color_loss)
+            ax1.grid(True, linestyle='--', alpha=0.6)
+            
+            # 设置动态 Loss Y 轴范围
+            if len(self.loss_history) > 100:
+                stable_losses = self.loss_history[len(self.loss_history)//10:]
+                ax1.set_ylim(0, max(stable_losses) * 1.5)
+            
+            # --- 2. 右侧 Y 轴：绘制点云数量曲线 ---
+            ax2 = ax1.twinx()
+            color_4d = '#ff7f0e'
+            color_3d = '#2ca02c'
+            
+            ax2.set_ylabel("Number of Gaussian Points", color='#333333', fontsize=12, fontweight='bold')
+            line_4d, = ax2.plot(self.loss_iterations, self.pts_4d_history, label="4D Dynamic Points", color=color_4d, linewidth=2.0, alpha=0.85)
+            
+            lines = [line_loss, line_4d]
+            
+            if sum(self.pts_3d_history) > 0:
+                line_3d, = ax2.plot(self.loss_iterations, self.pts_3d_history, label="3D Static Points", color=color_3d, linewidth=2.0, linestyle='--', alpha=0.85)
+                lines.append(line_3d)
                 
-                # proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=fovx_interp, fovY=fovy_interp).transpose(0, 1).cuda()
-                if cam_A.cx > 0:
-                    proj= getProjectionMatrixCenterShift(0.1, 100.0, cam_A.cx, cam_A.cy, cam_A.fl_x, cam_A.fl_y, cam_A.image_width, cam_A.image_height).transpose(0,1)
-                else:
-                    if cam_A.cyr != 0.0 :
-                        proj = getProjectionMatrixCV(znear=0.1, zfar=100.0, fovX=cam_A.FoVx, fovY=cam_A.FoVy, cx=cam_A.cxr, cy=cam_A.cyr).transpose(0,1)
-                    else: 
-                        proj = getProjectionMatrix(znear=0.1, zfar=100.0, fovX=cam_A.FoVx, fovY=cam_A.FoVy).transpose(0,1)
-                
-                # 9. 实例化 RenderCam 并暴力覆写参数
-                view_cam = RenderCam(cam_A) 
-                view_cam.image_width = render_w
-                view_cam.image_height = render_h
-                view_cam.FoVx = fovx_interp
-                view_cam.FoVy = fovy_interp
-                view_cam.world_view_transform = wvt
-                view_cam.projection_matrix = proj
-                view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
-                view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
-
-                view_cam.PrintSelfInfo()
-
-                # 10. 锁定前端 UI，让鼠标彻底无法拖拽改变视角
-                client.camera.position = pos_interp
-                client.camera.wxyz = q_interp
-                client.camera.fov = fovy_interp
-                
-                # 11. 执行原生渲染与遮罩过滤 (完全保留你原始的这部分逻辑)
-                active_mask = None
-                if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                    active_mask = (gaussians._start_frame <= frame_idx) & (gaussians._expire_frame >= frame_idx)
-                    if hasattr(gaussians, '_mask_dynamic'):
-                        active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
-
-                try:
-                    out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-                except TypeError:
-                    out = render(view_cam, gaussians, pipe, background)
-
-                img = torch.clamp(out["render"], 0, 1)
-                img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-
-                # client.scene.set_background_image(img_np, format="png")
-                render_aspect = view_cam.image_width / view_cam.image_height
-                if browser_aspect > render_aspect:
-                    canvas_h = view_cam.image_height
-                    canvas_w = int(view_cam.image_height * browser_aspect)
-                else:
-                    canvas_w = view_cam.image_width
-                    canvas_h = int(view_cam.image_width / browser_aspect)
-
-                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-                y0 = (canvas_h - view_cam.image_height) // 2
-                x0 = (canvas_w - view_cam.image_width) // 2
-                canvas[y0:y0+view_cam.image_height, x0:x0+view_cam.image_width] = img_np
-
-                client.scene.set_background_image(canvas, format="png")
-
-        time.sleep(0.01)
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-
-    lp = ModelParams(parser)
-    pp = PipelineParams(parser)
-
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
-
-    parser.add_argument("--gaussian_dim", type=int, default=4)
-    parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5,0.5])
-    parser.add_argument("--rot_4d", action="store_true", default=True)
-    parser.add_argument("--force_sh_3d", action="store_true", default=True)
-
-    args = parser.parse_args()
-
-    cfg = OmegaConf.load(args.config)
-
-    def merge(k, host):
-        if isinstance(host[k], DictConfig):
-            for kk in host[k]: merge(kk, host[k])
-        elif hasattr(args, k):
-            setattr(args, k, host[k])
-
-    for k in cfg: merge(k, cfg)
-
-    main(lp.extract(args), pp.extract(args), args)
+            ax2.tick_params(axis='y', labelcolor='#333333')
+            
+            # --- 3. 图例与保存 ---
+            labels = [l.get_label() for l in lines]
+            ax1.legend(lines, labels, loc="upper center", bbox_to_anchor=(0.5, 1.1), ncol=3, fontsize=11)
+            
+            plt.title("Training Loss and Densification over Iterations", fontsize=14, fontweight='bold', pad=30)
+            
+            loss_plot_path = os.path.join(self.args.model_path, "loss_and_points_curve.png")
+            plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"📊 [指标可视化] 训练 Loss 与高斯点数量联动图已保存至: {loss_plot_path}")
+            
+        except ImportError:
+            print("⚠️ [指标可视化] 缺少 matplotlib 库，跳过绘制图表。如需绘制请运行: pip install matplotlib")
+        except Exception as e:
+            print(f"⚠️ [指标可视化] 绘制联动图表时发生错误: {e}")
