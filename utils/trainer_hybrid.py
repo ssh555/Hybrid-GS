@@ -10,8 +10,8 @@ from utils.general_utils import knn
 from utils.trainer_swings import TrainerSWinGS
 
 class TrainerHybrid(TrainerSWinGS):
-    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
-        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params):
+        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
         self.tau_avg = getattr(args, 'tau_avg', 0.01)
         self.tau_max = getattr(args, 'tau_max', 0.05)
         self.lambda_d = getattr(args, 'lambda_d', 0.1)
@@ -38,7 +38,6 @@ class TrainerHybrid(TrainerSWinGS):
             frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
             frame_displacement = physical_velocity.norm(dim=-1) * frame_time
             is_static = (frame_displacement < self.tau_avg) & (frame_displacement < self.tau_max)
-            
             if is_static.any():
                 global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
@@ -364,6 +363,10 @@ class TrainerHybrid(TrainerSWinGS):
                     num_4d = self.gaussians.get_xyz.shape[0]
                     num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
                     self.metrics_tracker.record_training_stats(iteration, num_3d, num_4d)
+                
+                if self.debug_params.save_ply_interval > 0 and iteration % self.debug_params.save_ply_interval == 0:
+                    os.makedirs(self.args.model_path, exist_ok=True)
+                    self.gaussians.save_ply(os.path.join(self.args.model_path, f"debug_point_cloud_{iteration}.ply"))
                     
         progress_bar.close()
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "hybridgs_metrics.json"))

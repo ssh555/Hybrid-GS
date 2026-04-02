@@ -10,8 +10,8 @@ from utils.general_utils import knn
 from utils.trainer_4dgs import Trainer4DGS
 
 class TrainerSWinGS(Trainer4DGS):
-    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
-        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params):
+        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
         
         self.swin_size = getattr(args, 'swin_size', 50)
         self.total_frames = self.dataset.total_frames

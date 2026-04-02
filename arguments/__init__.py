@@ -154,3 +154,12 @@ def get_combined_args(parser : ArgumentParser):
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
+
+
+class DebugParams(ParamGroup):
+    def __init__(self, parser):
+        self.save_ply_interval = -1
+        self.is_load_ply = False
+        self.load_ply_path = ""
+        self.del_ply_on_start = True
+        super().__init__(parser, "Debug Parameters")

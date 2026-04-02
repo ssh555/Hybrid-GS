@@ -12,8 +12,8 @@ from utils.general_utils import knn
 from utils.trainer_base import BaseTrainer
 
 class Trainer4DGS(BaseTrainer):
-    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
-        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params):
+        super().__init__(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
         
         # 1. 完全按照 3D4DGS 的参数初始化 GaussianModel
         self.gaussians = GaussianModel(
@@ -36,13 +36,13 @@ class Trainer4DGS(BaseTrainer):
             time_duration=args.time_duration
         )
         self.gaussians.training_setup(opt)
-        
-        # 删除self.args.model_path路径下的chkpnt_*.pth和point_cloud_*.ply文件，避免与当前训练产生混淆
-        for filename in os.listdir(self.args.model_path):
-            if filename.startswith("chkpnt_") and filename.endswith(".pth"):
-                os.remove(os.path.join(self.args.model_path, filename))
-            elif filename.startswith("point_cloud_") and filename.endswith(".ply"):
-                os.remove(os.path.join(self.args.model_path, filename))
+        if self.debug_params.del_ply_on_start:
+            # 删除self.args.model_path路径下的chkpnt_*.pth和point_cloud_*.ply文件，避免与当前训练产生混淆
+            for filename in os.listdir(self.args.model_path):
+                if filename.startswith("chkpnt_") and filename.endswith(".pth"):
+                    os.remove(os.path.join(self.args.model_path, filename))
+                elif filename.startswith("point_cloud_") and filename.endswith(".ply"):
+                    os.remove(os.path.join(self.args.model_path, filename))
 
         # 3. 恢复权重
         self.first_iter = 0
@@ -50,6 +50,10 @@ class Trainer4DGS(BaseTrainer):
             print(f"[Trainer4DGS] 恢复权重: {self.args.start_checkpoint}")
             (model_params, self.first_iter) = torch.load(self.args.start_checkpoint, weights_only=False)
             self.gaussians.restore(model_params, opt)
+
+        if self.debug_params.is_load_ply and os.path.exists(self.debug_params.load_ply_path):
+            print(f"[Debug Trainer4DGS] 从 PLY 文件加载点云: {self.debug_params.load_ply_path}")
+            self.gaussians.load_from_ply(self.debug_params.load_ply_path)
             
         # 4. 背景与环境光贴图
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]

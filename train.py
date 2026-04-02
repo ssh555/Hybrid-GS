@@ -24,7 +24,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, easy_cmap
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, DebugParams
 from torchvision.utils import make_grid
 import numpy as np
 from omegaconf import OmegaConf
@@ -39,14 +39,14 @@ from utils.trainer_swings import TrainerSWinGS
 from utils.trainer_hybrid import TrainerHybrid
 
 
-def trainer_factory(args, dataset, opt, pipe, testing_iterations, saving_iterations):
+def trainer_factory(args, dataset, opt, pipe, testing_iterations, saving_iterations, debug_params):
     """工厂函数，根据参数动态实例化训练器"""
     if args.model_type == 'baseline_4dgs':
-        return Trainer4DGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+        return Trainer4DGS(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
     elif args.model_type == 'swings':
-        return TrainerSWinGS(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+        return TrainerSWinGS(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
     elif args.model_type == 'hybrid_gs':
-        return TrainerHybrid(dataset, opt, pipe, testing_iterations, saving_iterations, args)
+        return TrainerHybrid(dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params)
     else:
         raise ValueError(f"未知的模型类型: {args.model_type}")
     
@@ -208,6 +208,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    dp = DebugParams(parser)
     # # 新增模型路由参数
     # parser.add_argument("--model_type", type=str, default="hybrid_gs", 
     #                     choices=["baseline_4dgs", "swings", "hybrid_gs"], 
@@ -279,7 +280,8 @@ if __name__ == "__main__":
             opt=op.extract(args), 
             pipe=pp.extract(args), 
             testing_iterations=args.test_iterations, 
-            saving_iterations=args.save_iterations
+            saving_iterations=args.save_iterations,
+            debug_params=dp.extract(args)
         )
         # 启动统一的训练循环
         trainer.train()

@@ -5,13 +5,14 @@ import torch
 from utils.metrics_tracker import MetricsTracker
 
 class BaseTrainer:
-    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args):
+    def __init__(self, dataset, opt, pipe, testing_iterations, saving_iterations, args, debug_params):
         self.dataset = dataset
         self.opt = opt
         self.pipe = pipe
         self.testing_iterations = testing_iterations
         self.saving_iterations = saving_iterations
         self.args = args
+        self.debug_params = debug_params
         
         # 兼容 3D4DGS 的时间缩放逻辑
         if hasattr(self.dataset, 'frame_ratio') and self.dataset.frame_ratio > 1:
