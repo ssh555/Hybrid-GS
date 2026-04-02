@@ -84,7 +84,7 @@ class TrainerHybrid(TrainerSWinGS):
             # =====================================================================
             step_diffs = torch.norm(displacements[1:] - displacements[:-1], p=2, dim=-1) # [num_steps-1, N_dynamic]
             R_max = step_diffs.max(dim=0)[0] # [N_dynamic]
-
+            # print(f"[INFO] {R_avg} {R_max}")
             # 5. 联合判定：必须同时满足平均极小 AND 没有突发潜力，才是死物背景！
             is_static = (R_avg < self.tau_avg) & (R_max < self.tau_max)
 
@@ -99,7 +99,7 @@ class TrainerHybrid(TrainerSWinGS):
                 else:
                     print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
                 
-                print(f"❄️ [硬约束触发] 成功将 {is_static.sum().item()} 个背景高斯永久降维为 3D！")
+                # print(f"❄️ [硬约束触发] 成功将 {is_static.sum().item()} 个背景高斯永久降维为 3D！")
                 return global_static_mask
             
             return None
@@ -333,7 +333,7 @@ class TrainerHybrid(TrainerSWinGS):
                 freeze_end_iter = int(self.opt.iterations * self.opt.freeze_end)
                 
                 # 在窗口滑动时，触发严格的物理降维
-                if self.use_hard and iteration > freeze_start_iter and iteration < freeze_end_iter and iteration % self.slide_interval == 0:
+                if self.use_hard and iteration > freeze_start_iter and iteration < freeze_end_iter and iteration % self.opt.freeze_internal == 0:
                     self.robust_hard_constraint_classifier()
                 # ====================================================================
 

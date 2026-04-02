@@ -339,7 +339,7 @@ class GaussianModel:
             t = self.get_t[mask]
             
             # 处理 timestamp 可能是标量或张量的情况
-            if isinstance(timestamp, torch.Tensor):
+            if isinstance(timestamp, torch.Tensor) and timestamp.dim() > 0:
                 dt = timestamp[mask] - t
             else:
                 dt = timestamp - t
