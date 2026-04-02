@@ -181,15 +181,6 @@ class TrainerHybrid(TrainerSWinGS):
                         active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
                         
                         if active_indices.numel() > 0:
-                            # 绝对防爆：强制最多只抽 30,000 点
-                            if active_indices.numel() > 30000:
-                                perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
-                                active_indices = active_indices[perm]
-                                sampled_mask = torch.zeros_like(active_dynamic_mask)
-                                sampled_mask[active_indices] = True
-                                active_dynamic_mask = sampled_mask
-
-                            # 正确使用 current_t 算速度！
                             _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
                             
                             if current_lambda_d > 0:
@@ -205,21 +196,10 @@ class TrainerHybrid(TrainerSWinGS):
                                 coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
                                 total_reg_loss += self.opt.lambda_rigid * 5.0 * coherence_loss
 
-                # --- 硬约束模块 (用 10.0 的权重严厉惩罚被冻结点的任何微小运动) ---
+                # --- 硬约束模块 ---
                 if self.use_hard:
                     static_mask = (self.gaussians._mask_dynamic == 1)
                     if static_mask.any():
-                        static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                        
-                        # 绝对防爆：强制最多只抽 30,000 点
-                        if static_indices.numel() > 30000:
-                            perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
-                            static_indices = static_indices[perm]
-                            sampled_static_mask = torch.zeros_like(static_mask)
-                            sampled_static_mask[static_indices] = True
-                            static_mask = sampled_static_mask
-
-                        # 正确使用 current_t！
                         _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=static_mask)
                         total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
 
@@ -303,26 +283,41 @@ class TrainerHybrid(TrainerSWinGS):
                             
                             # if hasattr(self.gaussians, 'dynamic2static'):
                             #     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
+                            # 硬约束冻结 代替 原3D4DGS冻结
+                            # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
+                            freeze_start_iter = self.opt.iterations // 5
+                            
+                            # 在窗口滑动时，触发严格的物理降维
+                            if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                                kinematic_static_mask = self.robust_hard_constraint_classifier()
+                                
+                                if kinematic_static_mask is not None and kinematic_static_mask.any():
+                                    if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                                        # 🚀 调用自定义的物理转移函数
+                                        self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
+                                    else:
+                                        print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                            # ====================================================================
                                 
                 # 大扫除独立出来
                 if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
                     self.gaussians.reset_opacity()
 
-                # 硬约束冻结 代替 原3D4DGS冻结
-                # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                freeze_start_iter = self.opt.iterations // 5
+                # # 硬约束冻结 代替 原3D4DGS冻结
+                # # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
+                # freeze_start_iter = self.opt.iterations // 5
                 
-                # 在窗口滑动时，触发严格的物理降维
-                if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
-                    kinematic_static_mask = self.robust_hard_constraint_classifier()
+                # # 在窗口滑动时，触发严格的物理降维
+                # if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                #     kinematic_static_mask = self.robust_hard_constraint_classifier()
                     
-                    if kinematic_static_mask is not None and kinematic_static_mask.any():
-                        if hasattr(self.gaussians, 'kinematic_dynamic2static'):
-                            # 🚀 调用自定义的物理转移函数
-                            self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
-                        else:
-                            print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
-                # ====================================================================
+                #     if kinematic_static_mask is not None and kinematic_static_mask.any():
+                #         if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                #             # 🚀 调用自定义的物理转移函数
+                #             self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
+                #         else:
+                #             print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                # # ====================================================================
 
                 if iteration < self.opt.iterations:
                     # SWinGS 生命周期衰减
