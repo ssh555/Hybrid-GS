@@ -285,10 +285,11 @@ class TrainerHybrid(TrainerSWinGS):
                             #     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                             # 硬约束冻结 代替 原3D4DGS冻结
                             # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                            freeze_start_iter = self.opt.iterations // 5
+                            # freeze_start_iter = self.opt.iterations // 5
                             
                             # 在窗口滑动时，触发严格的物理降维
-                            if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                            # if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                            if self.use_hard and iteration % self.slide_interval == 0:
                                 kinematic_static_mask = self.robust_hard_constraint_classifier()
                                 
                                 if kinematic_static_mask is not None and kinematic_static_mask.any():
