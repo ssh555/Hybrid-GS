@@ -19,15 +19,24 @@ class TrainerHybrid(TrainerSWinGS):
         # 读取消融开关，默认全开（满血 HybridGS）
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
-
-    def get_effective_model_time(self, frame_idx):
-        alpha = frame_idx / max(self.total_frames - 1, 1)
         t = self.gaussians.get_t.detach().squeeze()
 
-        t_min = torch.quantile(t, 0.02).item()
-        t_max = torch.quantile(t, 0.98).item()
+        self.t_min = torch.quantile(t, 0.02)
+        self.t_max = torch.quantile(t, 0.98)
+    
+    def _update_sliding_window(self, iteration):
+        super()._update_sliding_window(iteration)
+        # 每次窗口更新时，清空缓存池，确保内存只占用
+        t = self.gaussians.get_t.detach().squeeze()
 
-        return alpha * (t_max - t_min) + t_min
+        self.t_min = torch.quantile(t, 0.02)
+        self.t_max = torch.quantile(t, 0.98)
+
+    def get_effective_model_time(self, frame_idx):
+
+
+        alpha = frame_idx.float() / max(self.total_frames - 1, 1)
+        return alpha * (self.t_max - self.t_min) + self.t_min
 
     def robust_hard_constraint_classifier(self):
         """
@@ -190,7 +199,11 @@ class TrainerHybrid(TrainerSWinGS):
                 # 硬约束点已被彻底剥离，这里绝不去算它们的 Loss！
                 # =========================================================
                 total_reg_loss = 0.0  
-                current_t = self.get_effective_model_time(frame_id) if hasattr(self, 'total_frames') else self.gaussians.get_t
+                # current_t = self.get_effective_model_time(frame_id) if hasattr(self, 'total_frames') else self.gaussians.get_t
+                t_prev = self.get_effective_model_time(max(frame_id - 1, 0))
+                t_curr = self.get_effective_model_time(frame_id)
+
+
 
                 if self.use_soft:
                     warmup_start = int(self.opt.iterations * self.opt.warmup_start) 
@@ -202,7 +215,7 @@ class TrainerHybrid(TrainerSWinGS):
                     if current_lambda_d > 0 or self.opt.lambda_rigid > 0:
                         alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
                         active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
-                        active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
+                        active_indices = torch.nonzero(active_dynamic_mask, as_tuple=True)[0]
                         
                         if active_indices.numel() > 0:
                             if active_indices.numel() > 30000:
@@ -213,12 +226,13 @@ class TrainerHybrid(TrainerSWinGS):
                                 active_dynamic_mask = sampled_mask
 
                             # 获取当前的位移向量 d (公式中的 \mathbf{d})
-                            _, displacement_d = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
-                            
+                            _, d_prev = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_prev, mask=active_dynamic_mask)
+                            _, d_curr = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_curr, mask=active_dynamic_mask)
+
                             # 位移收敛正则化：L_reg_d = \sum ||d||_2
                             # 作用：静止时使其归 0，充当时间平滑损失 L_time
                             if current_lambda_d > 0:
-                                total_reg_loss += current_lambda_d * displacement_d.norm(p=2, dim=1).mean()
+                                total_reg_loss += current_lambda_d * (d_curr - d_prev).norm(p=2, dim=1).mean()
 
 
                 # =========================================================
