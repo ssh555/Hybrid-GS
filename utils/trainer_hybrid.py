@@ -36,7 +36,6 @@ class TrainerHybrid(TrainerSWinGS):
             _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=dynamic_mask)
             duration = self.gaussians.time_duration[1] - self.gaussians.time_duration[0]
             frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
-            print(f"[INFO] Duration: {duration:.2f}s, Frame Time: {frame_time:.4f}s, Checking {dynamic_mask.sum().item()} dynamic points for hard constraint...")
             frame_displacement = physical_velocity.norm(dim=-1) * frame_time
             is_static = (frame_displacement < self.tau_avg) & (frame_displacement < self.tau_max)
             
