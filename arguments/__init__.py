@@ -125,7 +125,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_d = 0.1         # HybridGS 软约束: 位移收敛正则化惩罚系数
         self.freeze_start = 0.0       # HybridGS 硬约束：冻结静态背景开始迭代比例
         self.freeze_end = 1.0         # HybridGS 硬约束：冻结静态背景结束迭代比例
-        self.wwarmup_start = 0.0      # HybridGS 软约束：位移正则化开始迭代比例
+        self.warmup_start = 0.0      # HybridGS 软约束：位移正则化开始迭代比例
         self.warmup_end = 1.0         # HybridGS 软约束：位移正则化结束迭代比例
 
         self.use_soft_constraint = True
