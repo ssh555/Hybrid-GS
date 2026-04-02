@@ -26,17 +26,20 @@ class TrainerHybrid(TrainerSWinGS):
     
     def _update_sliding_window(self, iteration):
         super()._update_sliding_window(iteration)
-        # 每次窗口更新时，清空缓存池，确保内存只占用
         t = self.gaussians.get_t.detach().squeeze()
 
         self.t_min = torch.quantile(t, 0.02)
         self.t_max = torch.quantile(t, 0.98)
 
     def get_effective_model_time(self, frame_idx):
-
-
-        alpha = frame_idx.float() / max(self.total_frames - 1, 1)
+        frame_idx = torch.as_tensor(
+            frame_idx,
+            dtype=torch.float32,
+            device=self.t_min.device
+        )
+        alpha = frame_idx / max(self.total_frames - 1, 1)
         return alpha * (self.t_max - self.t_min) + self.t_min
+
 
     def robust_hard_constraint_classifier(self):
         """
@@ -229,10 +232,13 @@ class TrainerHybrid(TrainerSWinGS):
                             _, d_prev = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_prev, mask=active_dynamic_mask)
                             _, d_curr = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_curr, mask=active_dynamic_mask)
 
+                            dt = (t_curr - t_prev).clamp(min=1e-6)  # 防止除零
+                            vel = (d_curr - d_prev) / dt  # 近似速度
+
                             # 位移收敛正则化：L_reg_d = \sum ||d||_2
                             # 作用：静止时使其归 0，充当时间平滑损失 L_time
                             if current_lambda_d > 0:
-                                total_reg_loss += current_lambda_d * (d_curr - d_prev).norm(p=2, dim=1).mean()
+                                total_reg_loss += current_lambda_d * vel.norm(p=2, dim=1).mean()
 
 
                 # =========================================================
