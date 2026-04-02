@@ -19,10 +19,9 @@ class TrainerHybrid(TrainerSWinGS):
         # 读取消融开关，默认全开（满血 HybridGS）
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
-        self.use_mc = getattr(args, 'use_mc_sampling', True)
 
     def robust_hard_constraint_classifier(self):
-        """核心机制：基于运动学的物理冻结名单抓取"""
+        """核心机制：基于物理学单帧绝对位移的精准冻结"""
         with torch.no_grad():
             if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                 alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
@@ -33,32 +32,17 @@ class TrainerHybrid(TrainerSWinGS):
             if not dynamic_mask.any():
                 return None
             
-            t_base = self.gaussians.get_t
-            max_dt = 5.0 / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.02
-                
-            if self.use_mc:
-                dt_steps = torch.linspace(0.001, max_dt, steps=8, device="cuda").unsqueeze(-1)
-            else:
-                dt_steps = torch.tensor([0.005, max_dt], device="cuda").unsqueeze(-1)
-            
-            displacement_list = []
-            for i in range(dt_steps.shape[0]):
-                eval_t = torch.clamp(t_base + dt_steps[i], 0.0, 1.0)
-                _, v = self.gaussians.get_current_covariance_and_mean_offset(1.0, eval_t, mask=dynamic_mask)
-                displacement_list.append(v.norm(dim=-1))
-            
-            all_displacements = torch.stack(displacement_list, dim=1)
-            r_avg = all_displacements.mean(dim=1)
-            r_max = all_displacements.max(dim=1)[0]
-            
-            is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
+            t_plus_1 = self.gaussians.get_t[dynamic_mask] + 1.0
+            _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=dynamic_mask)
+            duration = self.gaussians.time_duration[1] - self.gaussians.time_duration[0]
+            frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
+            frame_displacement = physical_velocity.norm(dim=-1) * frame_time
+            is_static = (frame_displacement < self.tau_avg) & (frame_displacement < self.tau_max)
             
             if is_static.any():
-                # 提取出需要物理冻结的全局布尔掩码
                 global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
                 global_static_mask[global_static_indices] = True
-                
                 return global_static_mask
             
             return None
@@ -191,10 +175,11 @@ class TrainerHybrid(TrainerSWinGS):
                                 active_dynamic_mask = sampled_mask
 
                             # 正确使用 current_t 算速度！
-                            _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
+                            t_plus_1 = self.gaussians.get_t[active_dynamic_mask] + 1.0
+                            _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=active_dynamic_mask)
                             
                             if current_lambda_d > 0:
-                                total_reg_loss += current_lambda_d * velocity.norm(p=2, dim=1).mean()
+                                total_reg_loss += current_lambda_d * physical_velocity.norm(p=2, dim=1).mean()
 
                             # KNN 刚性约束
                             if self.opt.lambda_rigid > 0 and active_indices.numel() > 10:
@@ -220,9 +205,11 @@ class TrainerHybrid(TrainerSWinGS):
                             sampled_static_mask[static_indices] = True
                         else:
                             sampled_static_mask = static_mask
-                            
-                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=sampled_static_mask)
+
+                        t_plus_1_static = self.gaussians.get_t[sampled_static_mask] + 1.0
+                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1_static, mask=sampled_static_mask)
                         total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
+
 
                 # =========================================================
                 # 4. 统一反向传播 (剔除性能毒瘤，全场唯一的 Backward!)

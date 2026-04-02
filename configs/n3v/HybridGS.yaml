@@ -77,4 +77,3 @@ OptimizationParams:
   # ==========================================================
   use_soft_constraint: True   # 是否开启软约束 (运动速度惩罚)
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
-  use_mc_sampling: True       # 是否开启蒙特卡洛时间/空间采样 (提速与防抖)
