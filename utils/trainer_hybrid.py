@@ -36,6 +36,7 @@ class TrainerHybrid(TrainerSWinGS):
             _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=dynamic_mask)
             duration = self.gaussians.time_duration[1] - self.gaussians.time_duration[0]
             frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
+            print(f"[INFO] Duration: {duration:.2f}s, Frame Time: {frame_time:.4f}s, Checking {dynamic_mask.sum().item()} dynamic points for hard constraint...")
             frame_displacement = physical_velocity.norm(dim=-1) * frame_time
             is_static = (frame_displacement < self.tau_avg) & (frame_displacement < self.tau_max)
             
@@ -43,6 +44,12 @@ class TrainerHybrid(TrainerSWinGS):
                 global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
                 global_static_mask[global_static_indices] = True
+                if global_static_mask is not None and global_static_mask.any():
+                    if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                        # 🚀 调用自定义的物理转移函数
+                        self.gaussians.kinematic_dynamic2static(global_static_mask)
+                    else:
+                        print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
                 return global_static_mask
             
             return None
@@ -299,19 +306,12 @@ class TrainerHybrid(TrainerSWinGS):
 
                 # 硬约束冻结 代替 原3D4DGS冻结
                 # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                freeze_start_iter = self.opt.iterations // self.opt.freeze_start
-                freeze_end_iter = self.opt.iterations // self.opt.freeze_end
+                freeze_start_iter = int(self.opt.iterations * self.opt.freeze_start)
+                freeze_end_iter = int(self.opt.iterations * self.opt.freeze_end)
                 
                 # 在窗口滑动时，触发严格的物理降维
                 if self.use_hard and iteration > freeze_start_iter and iteration < freeze_end_iter and iteration % self.slide_interval == 0:
-                    kinematic_static_mask = self.robust_hard_constraint_classifier()
-                    
-                    if kinematic_static_mask is not None and kinematic_static_mask.any():
-                        if hasattr(self.gaussians, 'kinematic_dynamic2static'):
-                            # 🚀 调用自定义的物理转移函数
-                            self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
-                        else:
-                            print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                    self.robust_hard_constraint_classifier()
                 # ====================================================================
 
                 if iteration < self.opt.iterations:
