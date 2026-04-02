@@ -20,6 +20,7 @@ class TrainerSWinGS(Trainer4DGS):
         
         slide_steps = max(1, self.total_frames - self.swin_size)
         self.slide_interval = max(1, self.opt.iterations // slide_steps)
+        print("[TrainerSWinGS] 初始化完成！总帧数: {}, 窗口大小: {}, 滑动步数: {}, 每 {} 步滑动一次".format(self.total_frames, self.swin_size, slide_steps, self.slide_interval))
 
     def _update_sliding_window(self, iteration):
         """控制时间窗口滑动与高斯寿命延长"""
