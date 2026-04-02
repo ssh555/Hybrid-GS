@@ -32,7 +32,7 @@ class TrainerHybrid(TrainerSWinGS):
             if not dynamic_mask.any():
                 return None
             
-            t_plus_1 = self.gaussians.get_t[dynamic_mask] + 1.0
+            t_plus_1 = self.gaussians.get_t + 1.0
             _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=dynamic_mask)
             duration = self.gaussians.time_duration[1] - self.gaussians.time_duration[0]
             frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
@@ -175,7 +175,7 @@ class TrainerHybrid(TrainerSWinGS):
                                 active_dynamic_mask = sampled_mask
 
                             # 正确使用 current_t 算速度！
-                            t_plus_1 = self.gaussians.get_t[active_dynamic_mask] + 1.0
+                            t_plus_1 = self.gaussians.get_t + 1.0
                             _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=active_dynamic_mask)
                             
                             if current_lambda_d > 0:
@@ -187,7 +187,7 @@ class TrainerHybrid(TrainerSWinGS):
                                 xyz_dynamic = self.gaussians.get_xyz[active_dynamic_mask].contiguous()
                                 idx, dist = knn(xyz_dynamic[None].detach(), xyz_dynamic[None].detach(), k_neighbors)
                                 weight = torch.exp(-100 * dist)
-                                vel_dist = torch.norm(velocity[idx.squeeze(0)] - velocity.unsqueeze(1), p=2, dim=-1)
+                                vel_dist = torch.norm(physical_velocity[idx.squeeze(0)] - physical_velocity.unsqueeze(1), p=2, dim=-1)
                                 coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
                                 total_reg_loss += self.opt.lambda_rigid * 5.0 * coherence_loss
 
@@ -206,7 +206,7 @@ class TrainerHybrid(TrainerSWinGS):
                         else:
                             sampled_static_mask = static_mask
 
-                        t_plus_1_static = self.gaussians.get_t[sampled_static_mask] + 1.0
+                        t_plus_1_static = self.gaussians.get_t + 1.0
                         _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1_static, mask=sampled_static_mask)
                         total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
 
