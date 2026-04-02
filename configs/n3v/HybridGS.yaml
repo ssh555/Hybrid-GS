@@ -65,8 +65,9 @@ OptimizationParams:
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  tau_avg: 0.0002             # HybridGS 硬约束：平均位移阈值
-  tau_max: 0.001            # HybridGS 硬约束：最大瞬时位移阈值
+  lambda_time: 0.1       # SWinGS: 时间一致性正则化惩罚系数
+  tau_avg: 0.01             # HybridGS 硬约束：平均位移阈值
+  tau_max: 0.05            # HybridGS 硬约束：最大瞬时位移阈值
   freeze_start: 0.2       # HybridGS 硬约束：冻结静态背景开始迭代比例
   freeze_end: 0.5         # HybridGS 硬约束：冻结静态背景结束迭代比例
   lambda_d: 0.1             # HybridGS 软约束：位移收敛正则化系数
@@ -81,5 +82,5 @@ OptimizationParams:
 DebugParmas:
   save_ply_interval: 4000
   del_ply_on_start: True
-  is_load_ply: True
+  is_load_ply: False
   load_ply_path: "/home/ssh555/BiShe/Code/Hybrid-GS/output/hybrid_gs/miku_shaungxue_daxi/test_short/debug_point_cloud_4000.ply"

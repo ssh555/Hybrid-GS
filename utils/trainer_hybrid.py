@@ -20,8 +20,20 @@ class TrainerHybrid(TrainerSWinGS):
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
 
+    def get_effective_model_time(self, frame_idx):
+        alpha = frame_idx / max(self.total_frames - 1, 1)
+        t = self.gaussians.get_t.detach().squeeze()
+
+        t_min = torch.quantile(t, 0.02).item()
+        t_max = torch.quantile(t, 0.98).item()
+
+        return alpha * (t_max - t_min) + t_min
+
     def robust_hard_constraint_classifier(self):
-        """核心机制：基于物理学单帧绝对位移的精准冻结"""
+        """
+        🌟 核心机制修正：基于滑动窗口内 R_avg 和 R_max 的双重联合判定
+        彻底剔除假静态（间歇性动态），只将真正的永久背景冻结为 3D
+        """
         with torch.no_grad():
             if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
                 alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
@@ -32,22 +44,50 @@ class TrainerHybrid(TrainerSWinGS):
             if not dynamic_mask.any():
                 return None
             
-            t_plus_1 = self.gaussians.get_t + 1.0
-            _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=dynamic_mask)
-            duration = self.gaussians.time_duration[1] - self.gaussians.time_duration[0]
-            frame_time = duration / self.total_frames if hasattr(self, 'total_frames') and self.total_frames > 0 else 0.0333
-            frame_displacement = physical_velocity.norm(dim=-1) * frame_time
-            is_static = (frame_displacement < self.tau_avg) & (frame_displacement < self.tau_max)
+            # 1. 在当前时间窗口内均匀采样 8 个时间戳，用于评估一段时间内的运动潜力
+            num_steps = 8
+            t_samples = torch.linspace(self.window_start, self.window_end, steps=num_steps, device="cuda")
+            if hasattr(self, 'total_frames') and self.total_frames > 0:
+                t_samples = self.get_effective_model_time(t_samples)  # 将帧号映射到模型时间域
+
+            # 2. 收集窗口内各个时间戳的位移 d
+            displacements = []
+            for t in t_samples:
+                # 3D-4DGS 的底层：获取给定时间 t 的位移向量
+                _, d = self.gaussians.get_current_covariance_and_mean_offset(1.0, t, mask=dynamic_mask)
+                displacements.append(d)
+                
+            displacements = torch.stack(displacements, dim=0) # Shape: [num_steps, N_dynamic, 3]
+
+            # =====================================================================
+            # 3. 计算 R_avg (平均位移)：衡量宏观活跃度
+            #    将各个时间戳的位移减去该时间段内的平均位移，求范数均值
+            # =====================================================================
+            mean_d = displacements.mean(dim=0) # [N_dynamic, 3]
+            R_avg = torch.norm(displacements - mean_d.unsqueeze(0), p=2, dim=-1).mean(dim=0) # [N_dynamic]
+
+            # =====================================================================
+            # 4. 计算 R_max (最大瞬时位移)：衡量突发性动作潜力
+            #    计算相邻时间步之间的位移差最大值
+            # =====================================================================
+            step_diffs = torch.norm(displacements[1:] - displacements[:-1], p=2, dim=-1) # [num_steps-1, N_dynamic]
+            R_max = step_diffs.max(dim=0)[0] # [N_dynamic]
+
+            # 5. 联合判定：必须同时满足平均极小 AND 没有突发潜力，才是死物背景！
+            is_static = (R_avg < self.tau_avg) & (R_max < self.tau_max)
+
             if is_static.any():
                 global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
                 global_static_mask[global_static_indices] = True
-                if global_static_mask is not None and global_static_mask.any():
-                    if hasattr(self.gaussians, 'kinematic_dynamic2static'):
-                        # 🚀 调用自定义的物理转移函数
-                        self.gaussians.kinematic_dynamic2static(global_static_mask)
-                    else:
-                        print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                
+                # 触发 4D 到 3D 的永久转换 (切断 MLP)
+                if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                    self.gaussians.kinematic_dynamic2static(global_static_mask)
+                else:
+                    print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                
+                print(f"❄️ [硬约束触发] 成功将 {is_static.sum().item()} 个背景高斯永久降维为 3D！")
                 return global_static_mask
             
             return None
@@ -146,14 +186,12 @@ class TrainerHybrid(TrainerSWinGS):
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
 
                 # =========================================================
-                # 3. 终极修复：统一 HybridGS 软硬双重约束 (完全消融解耦，防爆，防时间穿梭)
+                # 🌟 核心修正：仅针对前景的软约束 (位移收敛正则化 L_reg_d)
+                # 硬约束点已被彻底剥离，这里绝不去算它们的 Loss！
                 # =========================================================
                 total_reg_loss = 0.0  
-                
-                # 🌟 修复：严格使用当前真实帧号的归一化时间
-                current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
+                current_t = self.get_effective_model_time(frame_id) if hasattr(self, 'total_frames') else self.gaussians.get_t
 
-                # --- 软约束模块 (控制动态点的平滑度与 KNN 刚性) ---
                 if self.use_soft:
                     warmup_start = int(self.opt.iterations * self.opt.warmup_start) 
                     warmup_end = int(self.opt.iterations * self.opt.warmup_end)
@@ -162,16 +200,11 @@ class TrainerHybrid(TrainerSWinGS):
                     else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
 
                     if current_lambda_d > 0 or self.opt.lambda_rigid > 0:
-                        if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                            alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
-                        else:
-                            alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
-                        
+                        alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
                         active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
                         active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
                         
                         if active_indices.numel() > 0:
-                            # 绝对防爆：强制最多只抽 30,000 点
                             if active_indices.numel() > 30000:
                                 perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
                                 active_indices = active_indices[perm]
@@ -179,41 +212,13 @@ class TrainerHybrid(TrainerSWinGS):
                                 sampled_mask[active_indices] = True
                                 active_dynamic_mask = sampled_mask
 
-                            # 正确使用 current_t 算速度！
-                            t_plus_1 = self.gaussians.get_t + 1.0
-                            _, physical_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=active_dynamic_mask)
+                            # 获取当前的位移向量 d (公式中的 \mathbf{d})
+                            _, displacement_d = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
                             
+                            # 位移收敛正则化：L_reg_d = \sum ||d||_2
+                            # 作用：静止时使其归 0，充当时间平滑损失 L_time
                             if current_lambda_d > 0:
-                                total_reg_loss += current_lambda_d * physical_velocity.norm(p=2, dim=1).mean()
-
-                            # KNN 刚性约束
-                            if self.opt.lambda_rigid > 0 and active_indices.numel() > 10:
-                                k_neighbors = 10
-                                xyz_dynamic = self.gaussians.get_xyz[active_dynamic_mask].contiguous()
-                                idx, dist = knn(xyz_dynamic[None].detach(), xyz_dynamic[None].detach(), k_neighbors)
-                                weight = torch.exp(-100 * dist)
-                                vel_dist = torch.norm(physical_velocity[idx.squeeze(0)] - physical_velocity.unsqueeze(1), p=2, dim=-1)
-                                coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
-                                total_reg_loss += self.opt.lambda_rigid * 5.0 * coherence_loss
-
-                # --- 硬约束模块 ---
-                if self.use_hard:
-                    static_mask = (self.gaussians._mask_dynamic == 1)
-                    if static_mask.any():
-                        static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                        
-                        # 备用防爆针：防止几百万个静态点把显存撑爆
-                        if static_indices.numel() > 30000:
-                            perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
-                            static_indices = static_indices[perm]
-                            sampled_static_mask = torch.zeros_like(static_mask)
-                            sampled_static_mask[static_indices] = True
-                        else:
-                            sampled_static_mask = static_mask
-
-                        t_plus_1_static = self.gaussians.get_t + 1.0
-                        _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1_static, mask=sampled_static_mask)
-                        total_reg_loss += 10.0 * static_velocity.norm(p=2, dim=1).mean()
+                                total_reg_loss += current_lambda_d * displacement_d.norm(p=2, dim=1).mean()
 
 
                 # =========================================================

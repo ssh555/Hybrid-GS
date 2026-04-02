@@ -65,3 +65,4 @@ OptimizationParams:
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 50             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
+  lambda_time: 0.1       # SWinGS: 时间一致性正则化惩罚系数

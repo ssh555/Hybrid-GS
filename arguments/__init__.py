@@ -119,6 +119,7 @@ class OptimizationParams(ParamGroup):
         # ==========================================================
         # [新增] SWinGS 与 HybridGS 专属超参数
         # ==========================================================
+        self.lambda_time = 0.1       # SWinGS: 时间一致性正则化惩罚系数
         self.swin_size = 50         # SWinGS: 滑动窗口大小 (例如每次只看50帧)
         self.tau_avg = 0.01         # HybridGS 硬约束: 平均位移阈值
         self.tau_max = 0.05         # HybridGS 硬约束: 最大瞬时位移阈值

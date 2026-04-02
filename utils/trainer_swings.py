@@ -221,7 +221,34 @@ class TrainerSWinGS(Trainer4DGS):
                 Ll1 = l1_loss(image, gt_image)
                 Lssim = 1.0 - ssim(image, gt_image)
                 current_loss = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * Lssim
-                
+
+                # SWinGS 的时间连续性损失 (L_time)
+                L_time = 0.0
+                lambda_time = getattr(self.opt, 'lambda_time', 0.1) # 可在配置文件中调节权重
+
+                if lambda_time > 0:
+                    # 获取当前窗口内所有存活的 4D 动态点
+                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                        active_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
+                    else:
+                        active_mask = torch.ones(self.gaussians.get_xyz.shape[0], dtype=torch.bool, device="cuda")
+                    
+                    if active_mask.any():
+                        # 提取时间 t 和 t+1，计算高斯点的物理运动速度
+                        time_min, time_max = self.gaussians.time_duration
+                        dt_frame = (time_max - time_min) / self.total_frames
+
+                        t_plus_1 = self.gaussians.get_t + dt_frame
+                        
+                        # 调用 4DGS 底层函数获取物理偏移 (velocity)
+                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_plus_1, mask=active_mask)
+                        
+                        velocity = velocity / dt_frame  # 转换为每帧的速度
+
+                        # 计算 L_time: 对所有活跃点速度的 L2 范数求均值，迫使运动平滑
+                        L_time = lambda_time * velocity.norm(p=2, dim=1).mean()
+                current_loss = current_loss + L_time
+
                 # Opa Mask Loss
                 if self.opt.lambda_opa_mask > 0 and hasattr(viewpoint_cam, 'gt_alpha_mask') and viewpoint_cam.gt_alpha_mask is not None:
                     o = alpha.clamp(1e-6, 1-1e-6)
