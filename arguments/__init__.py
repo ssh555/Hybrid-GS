@@ -123,10 +123,13 @@ class OptimizationParams(ParamGroup):
         self.tau_avg = 0.01         # HybridGS 硬约束: 平均位移阈值
         self.tau_max = 0.05         # HybridGS 硬约束: 最大瞬时位移阈值
         self.lambda_d = 0.1         # HybridGS 软约束: 位移收敛正则化惩罚系数
+        self.freeze_start = 0.0       # HybridGS 硬约束：冻结静态背景开始迭代比例
+        self.freeze_end = 1.0         # HybridGS 硬约束：冻结静态背景结束迭代比例
+        self.wwarmup_start = 0.0      # HybridGS 软约束：位移正则化开始迭代比例
+        self.warmup_end = 1.0         # HybridGS 软约束：位移正则化结束迭代比例
 
         self.use_soft_constraint = True
         self.use_hard_constraint = True
-        self.use_mc_sampling = True
 
         super().__init__(parser, "Optimization Parameters")
 
