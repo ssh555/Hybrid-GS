@@ -51,12 +51,7 @@ class TrainerHybrid(TrainerSWinGS):
             r_avg = all_displacements.mean(dim=1)
             r_max = all_displacements.max(dim=1)[0]
             
-            # 🌟 真正的自适应：放宽容忍度，允许均值 40% 的微弱抖动被物理冻结
-            scene_mean_movement = r_avg.mean().item()
-            adaptive_tau = scene_mean_movement * 0.4
-            adaptive_tau_max = adaptive_tau * 2.0
-            
-            is_static = (r_avg < adaptive_tau) & (r_max < adaptive_tau_max)
+            is_static = (r_avg < self.tau_avg) & (r_max < self.tau_max)
             
             if is_static.any():
                 # 提取出需要物理冻结的全局布尔掩码
