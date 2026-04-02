@@ -247,80 +247,6 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_radii_static.append(radii_static)
                     batch_visibility_filter_static.append(visibility_filter_static)
 
-            # =========================================================================
-            # 🚀 [终极融合架构] HybridGS 约束机制 (统一 Backward + 消融开关控制)
-            # =========================================================================
-            total_reg_loss = 0.0  # 🚀 必修修复 3：统一梯度收集池
-
-            # 🌟 核心修复 1：获取当前真实帧的时间戳！绝不能用固定值！
-            current_t = frame_id / self.total_frames if hasattr(self, 'total_frames') else self.gaussians.get_t
-
-            # --- 1. 软约束模块 (用 self.use_soft 控制) ---
-            if self.use_soft:
-                warmup_start, warmup_end = 10000, 20000
-                if iteration < warmup_start: current_lambda_d = 0.0
-                elif iteration > warmup_end: current_lambda_d = self.lambda_d
-                else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
-
-                if current_lambda_d > 0 or self.opt.lambda_rigid > 0:
-                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                        alive_mask = (self.gaussians._start_frame <= self.window_end) & (self.gaussians._expire_frame >= self.window_start)
-                    else:
-                        alive_mask = torch.ones_like(self.gaussians._mask_dynamic, dtype=torch.bool)
-                    
-                    active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
-                    active_indices = torch.nonzero(active_dynamic_mask, as_tuple=False).squeeze()
-                    
-                    if active_indices.numel() > 0:
-                        # 🌟 核心修复 2：绝对防爆机制，绝不能受 use_mc 控制！永远开启！
-                        if active_indices.numel() > 30000:
-                            perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
-                            active_indices = active_indices[perm]
-                            sampled_mask = torch.zeros_like(active_dynamic_mask)
-                            sampled_mask[active_indices] = True
-                            active_dynamic_mask = sampled_mask
-
-                        # 🌟 核心修复 3：使用 current_t 算速度防虚影！
-                        _, velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
-                        
-                        if current_lambda_d > 0:
-                            total_reg_loss += (current_lambda_d * velocity.norm(p=2, dim=1).mean()) / batch_size
-
-                        # 🌟 核心修复 4：补回丢失的 KNN 刚性约束！(防身体纸屑化)
-                        if self.opt.lambda_rigid > 0 and active_indices.numel() > 10:
-                            k_neighbors = 10
-                            xyz_dynamic = self.gaussians.get_xyz[active_dynamic_mask].contiguous()
-                            
-                            idx, dist = knn(xyz_dynamic[None].detach(), xyz_dynamic[None].detach(), k_neighbors)
-                            weight = torch.exp(-100 * dist)
-                            vel_dist = torch.norm(velocity[idx.squeeze(0)] - velocity.unsqueeze(1), p=2, dim=-1)
-                            coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_dynamic.shape[0]
-                            
-                            total_reg_loss += (self.opt.lambda_rigid * 5.0 * coherence_loss) / batch_size
-
-            # --- 2. 硬约束的静态物理锁死模块 (用 self.use_hard 控制) ---
-            if self.use_hard:
-                static_mask = (self.gaussians._mask_dynamic == 1)
-                if static_mask.any():
-                    static_indices = torch.nonzero(static_mask, as_tuple=False).squeeze()
-                    
-                    # 🌟 核心修复 5：绝对防爆机制！
-                    if static_indices.numel() > 30000:
-                        perm = torch.randperm(static_indices.numel(), device=static_indices.device)[:30000]
-                        static_indices = static_indices[perm]
-                        sampled_static_mask = torch.zeros_like(static_mask)
-                        sampled_static_mask[static_indices] = True
-                        static_mask = sampled_static_mask
-
-                    # 🌟 核心修复 6：同样必须使用 current_t！
-                    _, static_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=static_mask)
-                    total_reg_loss += (10.0 * static_velocity.norm(p=2, dim=1).mean()) / batch_size
-
-            # 🚀 统一单次 Backward
-            if isinstance(total_reg_loss, torch.Tensor) and total_reg_loss.requires_grad:
-                total_reg_loss.backward()
-                loss += total_reg_loss.item()
-            # =========================================================================
 
             if batch_size > 1:
                 visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
@@ -382,27 +308,26 @@ class TrainerHybrid(TrainerSWinGS):
                             
                             # if hasattr(self.gaussians, 'dynamic2static'):
                             #     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
-                            # 硬约束冻结 代替 原3D4DGS冻结
-                            # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                            freeze_start_iter = self.opt.iterations // 5
-                            
-                            # 在窗口滑动时，触发严格的物理降维
-                            if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
-                                kinematic_static_mask = self.robust_hard_constraint_classifier()
-                                
-                                if kinematic_static_mask is not None and kinematic_static_mask.any():
-                                    if hasattr(self.gaussians, 'kinematic_dynamic2static'):
-                                        # 🚀 调用自定义的物理转移函数
-                                        self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
-                                    else:
-                                        print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
-                            # ====================================================================
                                 
                 # 大扫除独立出来
                 if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
                     self.gaussians.reset_opacity()
 
-
+                # 硬约束冻结 代替 原3D4DGS冻结
+                # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
+                freeze_start_iter = self.opt.iterations // 5
+                
+                # 在窗口滑动时，触发严格的物理降维
+                if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
+                    kinematic_static_mask = self.robust_hard_constraint_classifier()
+                    
+                    if kinematic_static_mask is not None and kinematic_static_mask.any():
+                        if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                            # 🚀 调用自定义的物理转移函数
+                            self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
+                        else:
+                            print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                # ====================================================================
 
                 if iteration < self.opt.iterations:
                     # SWinGS 生命周期衰减
