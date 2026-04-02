@@ -166,7 +166,8 @@ class TrainerHybrid(TrainerSWinGS):
 
                 # --- 软约束模块 (控制动态点的平滑度与 KNN 刚性) ---
                 if self.use_soft:
-                    warmup_start, warmup_end = 10000, 20000
+                    warmup_start = int(self.opt.iterations * 0.10) 
+                    warmup_end = int(self.opt.iterations * 0.25)
                     if iteration < warmup_start: current_lambda_d = 0.0
                     elif iteration > warmup_end: current_lambda_d = self.lambda_d
                     else: current_lambda_d = self.lambda_d * ((iteration - warmup_start) / (warmup_end - warmup_start))
@@ -304,20 +305,21 @@ class TrainerHybrid(TrainerSWinGS):
                             # if hasattr(self.gaussians, 'dynamic2static'):
                             #     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                             # 硬约束冻结 代替 原3D4DGS冻结
-                            # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
-                            freeze_start_iter = self.opt.iterations // 5
+                        
+                        # =============== [核心机制] HybridGS 空间解耦硬约束 ===============
+                        freeze_start_iter = self.opt.iterations // 5
+                        
+                        # 在窗口滑动时，触发严格的物理降维
+                        if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0 and iteration < self.opt.densify_until_iter:
+                            kinematic_static_mask = self.robust_hard_constraint_classifier()
                             
-                            # 在窗口滑动时，触发严格的物理降维
-                            if self.use_hard and iteration > freeze_start_iter and iteration % self.slide_interval == 0:
-                                kinematic_static_mask = self.robust_hard_constraint_classifier()
-                                
-                                if kinematic_static_mask is not None and kinematic_static_mask.any():
-                                    if hasattr(self.gaussians, 'kinematic_dynamic2static'):
-                                        # 🚀 调用自定义的物理转移函数
-                                        self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
-                                    else:
-                                        print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
-                            # ====================================================================
+                            if kinematic_static_mask is not None and kinematic_static_mask.any():
+                                if hasattr(self.gaussians, 'kinematic_dynamic2static'):
+                                    # 🚀 调用自定义的物理转移函数
+                                    self.gaussians.kinematic_dynamic2static(kinematic_static_mask)
+                                else:
+                                    print("⚠️ 架构缺失：请在 gaussian_model.py 中实现 kinematic_dynamic2static(mask)！")
+                        # ====================================================================
                                 
                 # 大扫除独立出来
                 if iteration % self.opt.opacity_reset_interval == 0 or (hasattr(self.dataset, 'white_background') and self.dataset.white_background and iteration == self.opt.densify_from_iter):
