@@ -57,10 +57,12 @@ class TrainerHybrid(TrainerSWinGS):
                 return None
             
             # 1. 在当前时间窗口内均匀采样 8 个时间戳，用于评估一段时间内的运动潜力
-            num_steps = 8
-            t_samples = torch.linspace(self.window_start, self.window_end, steps=num_steps, device="cuda")
-            if hasattr(self, 'total_frames') and self.total_frames > 0:
-                t_samples = self.get_effective_model_time(t_samples)  # 将帧号映射到模型时间域
+            num_steps = min(8, self.window_end - self.window_start + 1)
+            frame_samples = torch.linspace(self.window_start, self.window_end, steps=num_steps, device="cuda").round().long()
+            
+            # 2. 映射为 30FPS 的物理时间
+            FPS = 30.0
+            t_samples = frame_samples.float() / FPS
 
             # 2. 收集窗口内各个时间戳的位移 d
             displacements = []
@@ -83,7 +85,7 @@ class TrainerHybrid(TrainerSWinGS):
             #    计算相邻时间步之间的位移差最大值
             # =====================================================================
             step_diffs = torch.norm(displacements[1:] - displacements[:-1], p=2, dim=-1) # [num_steps-1, N_dynamic]
-            R_max = step_diffs.max(dim=0)[0] # [N_dynamic]
+            R_max = step_diffs.max(dim=0)[0] if step_diffs.shape[0] > 0 else torch.zeros_like(R_avg) # [N_dynamic]
             # print(f"[INFO] {R_avg} {R_max}")
             # 5. 联合判定：必须同时满足平均极小 AND 没有突发潜力，才是死物背景！
             is_static = (R_avg < self.tau_avg) & (R_max < self.tau_max)
@@ -203,8 +205,8 @@ class TrainerHybrid(TrainerSWinGS):
                 # =========================================================
                 total_reg_loss = 0.0  
                 # current_t = self.get_effective_model_time(frame_id) if hasattr(self, 'total_frames') else self.gaussians.get_t
-                t_prev = self.get_effective_model_time(max(frame_id - 1, 0))
-                t_curr = self.get_effective_model_time(frame_id)
+                # t_prev = self.get_effective_model_time(max(frame_id - 1, 0))
+                # t_curr = self.get_effective_model_time(frame_id)
 
 
 
@@ -227,7 +229,9 @@ class TrainerHybrid(TrainerSWinGS):
                                 sampled_mask = torch.zeros_like(active_dynamic_mask)
                                 sampled_mask[active_indices] = True
                                 active_dynamic_mask = sampled_mask
-
+                            FPS = 30.0
+                            t_curr = frame_id / FPS
+                            t_prev = max(0, frame_id - 1) / FPS
                             # 获取当前的位移向量 d (公式中的 \mathbf{d})
                             _, d_prev = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_prev, mask=active_dynamic_mask)
                             _, d_curr = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_curr, mask=active_dynamic_mask)
@@ -338,12 +342,12 @@ class TrainerHybrid(TrainerSWinGS):
                 # ====================================================================
 
                 if iteration < self.opt.iterations:
-                    # SWinGS 生命周期衰减
-                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
-                        decay_factor = 1.0 / age.float()
-                        if self.gaussians._xyz.grad is not None:
-                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
+                    # # SWinGS 生命周期衰减
+                    # if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                    #     age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
+                    #     decay_factor = 1.0 / age.float()
+                    #     if self.gaussians._xyz.grad is not None:
+                    #         self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
                     
                     # =============== [核心修复] 静止点时间梯度清零 ===============
                     # 防止已经被硬约束判为静态的背景，被优化器意外扯动！

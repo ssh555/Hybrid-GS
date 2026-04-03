@@ -71,7 +71,7 @@ OptimizationParams:
   freeze_start: 0.2       # HybridGS 硬约束：冻结静态背景开始迭代比例
   freeze_end: 0.5         # HybridGS 硬约束：冻结静态背景结束迭代比例
   freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
-  lambda_d: 0.1             # HybridGS 软约束：位移收敛正则化系数
+  lambda_d: 0.001             # HybridGS 软约束：位移收敛正则化系数
   warmup_start: 0.10      # HybridGS 软约束：位移正则化开始迭代比例
   warmup_end: 0.25        # HybridGS 软约束：位移正则化结束迭代比例
   # ==========================================================

@@ -373,11 +373,12 @@ class TrainerSWinGS(Trainer4DGS):
                         
                 # =============== [核心机制] SWinGS 生命周期梯度衰减 ===============
                 if iteration < self.opt.iterations:
-                    if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
-                        age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
-                        decay_factor = 1.0 / age.float()
-                        if self.gaussians._xyz.grad is not None:
-                            self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
+                    # 删除生命周期梯度衰减
+                    # if hasattr(self.gaussians, '_start_frame') and self.gaussians._start_frame.numel() > 0:
+                    #     age = (self.window_end - self.gaussians._start_frame).clamp(min=1)
+                    #     decay_factor = 1.0 / age.float()
+                    #     if self.gaussians._xyz.grad is not None:
+                    #         self.gaussians._xyz.grad *= decay_factor.unsqueeze(-1)
                             
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad(set_to_none=True)
