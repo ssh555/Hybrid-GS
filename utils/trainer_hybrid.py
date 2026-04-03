@@ -217,7 +217,7 @@ class TrainerHybrid(TrainerSWinGS):
                             _, d_prev = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_prev, mask=active_dynamic_mask)
                             _, d_curr = self.gaussians.get_current_covariance_and_mean_offset(1.0, t_curr, mask=active_dynamic_mask)
 
-                            dt = (t_curr - t_prev).clamp(min=1e-6)  # 防止除零
+                            dt = max(t_curr - t_prev, 1e-6)  # 防止除零
                             vel = (d_curr - d_prev) / dt  # 近似速度
 
                             # 位移收敛正则化：L_reg_d = \sum ||d||_2
