@@ -81,7 +81,7 @@ OptimizationParams:
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
 
 DebugParmas:
-  save_ply_interval: 4000
+  save_ply_interval: -1
   del_ply_on_start: True
   is_load_ply: False
   load_ply_path: "/home/ssh555/BiShe/Code/Hybrid-GS/output/hybrid_gs/miku_shaungxue_daxi/test_short/debug_point_cloud_4000.ply"

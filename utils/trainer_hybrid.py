@@ -333,7 +333,7 @@ class TrainerHybrid(TrainerSWinGS):
                 freeze_end_iter = int(self.opt.iterations * self.opt.freeze_end)
                 
                 # 在窗口滑动时，触发严格的物理降维
-                if self.use_hard and iteration > freeze_start_iter and iteration < freeze_end_iter and iteration % self.opt.freeze_internal == 0:
+                if self.use_hard and iteration >= freeze_start_iter and iteration <= freeze_end_iter and iteration % self.opt.freeze_internal == 0:
                     self.robust_hard_constraint_classifier()
                 # ====================================================================
 
