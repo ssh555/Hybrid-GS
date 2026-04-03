@@ -19,27 +19,6 @@ class TrainerHybrid(TrainerSWinGS):
         # 读取消融开关，默认全开（满血 HybridGS）
         self.use_soft = getattr(args, 'use_soft_constraint', True)
         self.use_hard = getattr(args, 'use_hard_constraint', True)
-        t = self.gaussians.get_t.detach().squeeze()
-
-        self.t_min = torch.quantile(t, 0.02)
-        self.t_max = torch.quantile(t, 0.98)
-    
-    def _update_sliding_window(self, iteration):
-        super()._update_sliding_window(iteration)
-        t = self.gaussians.get_t.detach().squeeze()
-
-        self.t_min = torch.quantile(t, 0.02)
-        self.t_max = torch.quantile(t, 0.98)
-
-    def get_effective_model_time(self, frame_idx):
-        frame_idx = torch.as_tensor(
-            frame_idx,
-            dtype=torch.float32,
-            device=self.t_min.device
-        )
-        alpha = frame_idx / max(self.total_frames - 1, 1)
-        return alpha * (self.t_max - self.t_min) + self.t_min
-
 
     def robust_hard_constraint_classifier(self):
         """
@@ -88,7 +67,12 @@ class TrainerHybrid(TrainerSWinGS):
             R_max = step_diffs.max(dim=0)[0] if step_diffs.shape[0] > 0 else torch.zeros_like(R_avg) # [N_dynamic]
             # print(f"[INFO] {R_avg} {R_max}")
             # 5. 联合判定：必须同时满足平均极小 AND 没有突发潜力，才是死物背景！
-            is_static = (R_avg < self.tau_avg) & (R_max < self.tau_max)
+            extent = self.scene.cameras_extent  
+            dynamic_tau_avg = self.tau_avg * extent
+            dynamic_tau_max = self.tau_max * extent
+
+            # 联合判定：必须使用动态缩放后的阈值！
+            is_static = (R_avg < dynamic_tau_avg) & (R_max < dynamic_tau_max)
 
             if is_static.any():
                 global_static_mask = torch.zeros_like(self.gaussians._mask_dynamic, dtype=torch.bool)
@@ -204,9 +188,6 @@ class TrainerHybrid(TrainerSWinGS):
                 # 硬约束点已被彻底剥离，这里绝不去算它们的 Loss！
                 # =========================================================
                 total_reg_loss = 0.0  
-                # current_t = self.get_effective_model_time(frame_id) if hasattr(self, 'total_frames') else self.gaussians.get_t
-                # t_prev = self.get_effective_model_time(max(frame_id - 1, 0))
-                # t_curr = self.get_effective_model_time(frame_id)
 
 
 
