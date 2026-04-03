@@ -153,14 +153,34 @@ class TrainerHybrid(TrainerSWinGS):
             
             loss = 0
             for batch_idx in range(batch_size):
-                # 1. 窗口采样与数据读取
-                t_id = random.randint(self.window_start, self.window_end)
+                # =========================================================
+                # 🌟 优化核心：加入经验回放 (Experience Replay) 抵御灾难性遗忘
+                # =========================================================
+                if self.window_start > 0 and random.random() < self.opt.replay_prob:
+                    # 采样历史帧（复习旧动作，保持 MLP 记忆）
+                    t_id = random.randint(0, self.window_start - 1)
+                    is_historical = True
+                else:
+                    # 采样当前滑动窗口内的帧（学习新动作）
+                    t_id = random.randint(self.window_start, self.window_end)
+                    is_historical = False
+
                 dataset_idx = random.choice(self.frames_dict[t_id])
                 frame_id = t_id
 
-                if dataset_idx not in self.window_cache:
-                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
-                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                # =========================================================
+                # 🧠 内存安全的按需读取 (Lazy Loading + LRU Cache 思想)
+                # =========================================================
+                if dataset_idx in self.window_cache:
+                    gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                else:
+                    # 历史帧按需从磁盘读取，但不永久加入 cache，防止显存 OOM
+                    gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                    
+                    if not is_historical:
+                        # 只有当前窗口的帧才加入常驻缓存
+                        self.window_cache[dataset_idx] = (gt_image, viewpoint_cam)
+                        
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 active_mask = self._get_active_dynamic_mask(frame_id)

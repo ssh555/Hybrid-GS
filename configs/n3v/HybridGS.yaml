@@ -79,6 +79,7 @@ OptimizationParams:
   # ==========================================================
   use_soft_constraint: True   # 是否开启软约束 (运动速度惩罚)
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
+  replay_prob: 0.25        # SWinGS / HybridGS 经验回放概率
 
 DebugParmas:
   save_ply_interval: -1

@@ -132,6 +132,7 @@ class OptimizationParams(ParamGroup):
 
         self.use_soft_constraint = True
         self.use_hard_constraint = True
+        self.replay_prob = 0.25        # SWinGS / HybridGS 经验回放概率
 
         super().__init__(parser, "Optimization Parameters")
 

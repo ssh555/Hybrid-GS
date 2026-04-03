@@ -188,24 +188,34 @@ class TrainerSWinGS(Trainer4DGS):
             loss = 0
             # =============== 批处理循环 (仅在窗口内采样) ===============
             for batch_idx in range(batch_size):
-                # 1. SWinGS 官方算法：在当前活跃的滑动窗口内进行均匀随机抽样 (SGD核心)
-                t_id = random.randint(self.window_start, self.window_end)
-                
-                # 2. 从预处理的字典中，随机抽取该帧对应的一个相机视角
-                # 这个做法 100% 避免了之前的数组越界和单视角 Bug
+                # =========================================================
+                # 🌟 优化核心：加入经验回放 (Experience Replay) 抵御灾难性遗忘
+                # =========================================================
+                if self.window_start > 0 and random.random() < self.opt.replay_prob:
+                    # 采样历史帧（复习旧动作，保持 MLP 记忆）
+                    t_id = random.randint(0, self.window_start - 1)
+                    is_historical = True
+                else:
+                    # 采样当前滑动窗口内的帧（学习新动作）
+                    t_id = random.randint(self.window_start, self.window_end)
+                    is_historical = False
+
                 dataset_idx = random.choice(self.frames_dict[t_id])
-                
-                # 3. 提取真实图像和相机位姿
                 frame_id = t_id
-                # ===================================================
-                # 🚀 动态缓存读取机制
-                # ===================================================
-                if dataset_idx not in self.window_cache:
-                    # 如果内存里没有（新进窗口的帧），就去硬盘读一次，并存入缓存
-                    self.window_cache[dataset_idx] = training_dataset[dataset_idx]
-                
-                # 从内存中光速读取！
-                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+
+                # =========================================================
+                # 🧠 内存安全的按需读取 (Lazy Loading + LRU Cache 思想)
+                # =========================================================
+                if dataset_idx in self.window_cache:
+                    gt_image, viewpoint_cam = self.window_cache[dataset_idx]
+                else:
+                    # 历史帧按需从磁盘读取，但不永久加入 cache，防止显存 OOM
+                    gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                    
+                    if not is_historical:
+                        # 只有当前窗口的帧才加入常驻缓存
+                        self.window_cache[dataset_idx] = (gt_image, viewpoint_cam)
+                        
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 # render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background)
