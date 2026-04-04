@@ -77,7 +77,7 @@ class TrainerHybrid(TrainerSWinGS):
 
         training_dataset = self.scene.getTrainCameras()
         total_iters = self.opt.iterations
-        warmup_iters = int(self.opt.warmup_start * total_iters)
+        warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1 (Hybrid)")
         

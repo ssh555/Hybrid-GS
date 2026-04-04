@@ -116,7 +116,7 @@ class TrainerSWinGS(Trainer4DGS):
         
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
-        warmup_iters = int(self.opt.warmup_start * total_iters)
+        warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1")
         
