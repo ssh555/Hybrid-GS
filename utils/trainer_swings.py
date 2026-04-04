@@ -61,22 +61,27 @@ class TrainerSWinGS(Trainer4DGS):
         return active_mask
 
     @torch.no_grad()
-    def evaluate(self, iteration, tag=""):
-        print(f"\n[评估 SWinGS {tag}] 正在执行 Iteration {iteration} 的测试集评估...")
+    def evaluate(self, iteration, start_frame=0, end_frame=None, tag=""):
+        print(f"\n[评估 {tag}] 正在执行 Iteration {iteration} 的测试集评估...")
         test_cameras = self.scene.getTestCameras()
         if not test_cameras: return
             
         total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
+        valid_frames_count = 0  # 记录当前窗口内有效测试帧的数量
         
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
             gt_image, viewpoint_cam = batch_data
-            if gt_image is not None: gt_image = gt_image.cuda()
-            
             try: frame_id = int(viewpoint_cam.image_name.split('_')[-1])
             except: frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
             
-            active_mask = self._get_active_dynamic_mask(frame_id)
+            # 直接跳过不属于当前窗口的测试帧！防止纯黑画面拉低平均分！
+            if end_frame is not None:
+                if frame_id < start_frame or frame_id > end_frame:
+                    continue
+                    
+            if gt_image is not None: gt_image = gt_image.cuda()
             
+            active_mask = self._get_active_dynamic_mask(frame_id)
             if active_mask is not None and not active_mask.any():
                 image = self.background.clone().view(3, 1, 1).expand(3, viewpoint_cam.image_height, viewpoint_cam.image_width)
                 fps = 1000.0
@@ -89,14 +94,19 @@ class TrainerSWinGS(Trainer4DGS):
             if gt_image is not None:
                 total_psnr += psnr(image, gt_image).mean().item()
                 total_ssim += ssim(image, gt_image).mean().item()
+                valid_frames_count += 1
             total_fps += fps
             
-        avg_psnr = total_psnr / len(test_cameras) if total_psnr > 0 else 0
-        avg_ssim = total_ssim / len(test_cameras) if total_ssim > 0 else 0
-        avg_fps = total_fps / len(test_cameras)
+        if valid_frames_count == 0:
+            print("[评估警告] 当前窗口没有分配到测试帧。")
+            return
+            
+        avg_psnr = total_psnr / valid_frames_count
+        avg_ssim = total_ssim / valid_frames_count
+        avg_fps = total_fps / valid_frames_count
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
-        print(f"[评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+        print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
         """阶段一：独立训练当前窗口（使用 YAML 中的 self.opt.iterations）"""
@@ -247,7 +257,7 @@ class TrainerSWinGS(Trainer4DGS):
 
                 # 每个窗口结束前保留测试和保存
                 if iteration == self.opt.iterations:
-                    self.evaluate(iteration, tag=f"Phase1_Win{win_idx}")
+                    self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase1_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
                     self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
 
@@ -321,9 +331,9 @@ class TrainerSWinGS(Trainer4DGS):
                     self.pts_3d_history.append(0)
 
                 if iteration == finetune_iters:
-                    self.evaluate(self.global_iter, tag=f"Phase2_Win{win_idx}")
+                    self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase2_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
-                    self.gaussians.save_ply(os.path.join(self.args.model_path, f"final_point_cloud_win{win_idx}.ply"))
+                    # self.gaussians.save_ply(os.path.join(self.args.model_path, f"final_point_cloud_win{win_idx}.ply"))
 
         progress_bar.close()
 
@@ -397,8 +407,8 @@ class TrainerSWinGS(Trainer4DGS):
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
-        print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.global_iter}.pth")
-        self._save_checkpoint(str(self.global_iter))
+        print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
+        self._save_checkpoint(str(self.opt.iterations))
 
         print("\n🎉 SWinGS 两阶段严格训练完成！正在生成图表...")
         

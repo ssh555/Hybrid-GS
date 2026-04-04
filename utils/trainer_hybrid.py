@@ -247,7 +247,7 @@ class TrainerHybrid(TrainerSWinGS):
                 self.pts_3d_history.append(num_3d)
 
             if iteration == self.opt.iterations:
-                self.evaluate(self.global_iter, tag=f"Phase1_Win{win_idx}")
+                self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase1_Win{win_idx}")
                 os.makedirs(self.args.model_path, exist_ok=True)
                 try: num_3d = self.gaussians.get_static_xyz.shape[0] if hasattr(self.gaussians, 'get_static_xyz') else 0
                 except: num_3d = 0
