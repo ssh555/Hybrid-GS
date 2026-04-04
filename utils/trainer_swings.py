@@ -334,6 +334,7 @@ class TrainerSWinGS(Trainer4DGS):
                     self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase2_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
                     # self.gaussians.save_ply(os.path.join(self.args.model_path, f"final_point_cloud_win{win_idx}.ply"))
+        self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
 
         progress_bar.close()
 
