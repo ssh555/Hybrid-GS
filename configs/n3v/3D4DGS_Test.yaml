@@ -6,12 +6,12 @@ rot_4d: True
 force_sh_3d: True
 batch_size: 4
 exhaust_test: False
-start_checkpoint: "output/swings/miku_shaungxue_daxi/test_short/chkpnt_8000.pth"
+start_checkpoint: "output/3d4dgs/miku_shaungxue_daxi/full/chkpnt_8000.pth"
 
 ModelParams:
   sh_degree: 3
-  source_path: "./datasets/miku_shaungxue_daxi/test_short"
-  model_path: "output/swings/miku_shaungxue_daxi/test_short"
+  source_path: "./datasets/miku_shaungxue_daxi/full"
+  model_path: "output/3d4dgs/miku_shaungxue_daxi/full"
   images: "images"
   resolution: 1 
   white_background: False
@@ -23,7 +23,7 @@ ModelParams:
   frame_ratio: 1
   dataloader: True
   # [核心路由] 指定使用的模型类型
-  model_type: "swings"   # 可选值: baseline_4dgs, swings, hybrid_gs
+  model_type: "baseline_4dgs"   # 可选值: baseline_4dgs, swings, hybrid_gs
 
 PipelineParams:
   convert_SHs_python: False
@@ -60,12 +60,3 @@ OptimizationParams:
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0
-  
-  # ==========================================================
-  # [新增] SWinGS 与 HybridGS 专属超参数
-  # ==========================================================
-  swin_size: 52             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  lambda_time: 0.001       # SWinGS: 时间一致性正则化惩罚系数
-  replay_prob: 0.25        # SWinGS / HybridGS 经验回放概率
-  warmup_iterations: 1500        # SWinGS Warmup 阶段开始迭代比例
-  finetune_iterations: 1000   # SWinGS 细调阶段迭代比例 (在 Warmup 之后，全面开启时间一致性正则化)

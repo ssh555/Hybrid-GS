@@ -41,7 +41,7 @@ class TrainerSWinGS(Trainer4DGS):
             if frame_id not in self.frames_dict:
                 self.frames_dict[frame_id] = []
             self.frames_dict[frame_id].append(idx)
-
+            
         self.window_cache = {}
         
         # 记录全局绘图数据
@@ -73,7 +73,6 @@ class TrainerSWinGS(Trainer4DGS):
             gt_image, viewpoint_cam = batch_data
             try: frame_id = int(viewpoint_cam.image_name.split('_')[-1])
             except: frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
-            
             # 直接跳过不属于当前窗口的测试帧！防止纯黑画面拉低平均分！
             if end_frame is not None:
                 if frame_id < start_frame or frame_id > end_frame:
@@ -119,7 +118,7 @@ class TrainerSWinGS(Trainer4DGS):
             self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
         # 框定生命周期在当前窗口
-        self.gaussians._start_frame[:] = start_frame
+        self.gaussians._start_frame[:] = start_frame  
         self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
