@@ -75,7 +75,6 @@ class TrainerHybrid(TrainerSWinGS):
         self.gaussians._start_frame[:] = start_frame
         self.gaussians._expire_frame[:] = end_frame
 
-        training_dataset = self.scene.getTrainCameras()
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
         
@@ -102,7 +101,7 @@ class TrainerHybrid(TrainerSWinGS):
             for batch_idx in range(batch_size):
                 t_id = random.randint(start_frame, end_frame)
                 dataset_idx = random.choice(self.frames_dict[t_id])
-                gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 active_mask = self._get_active_dynamic_mask(t_id)

@@ -31,9 +31,9 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"[TrainerSWinGS] 窗口规划: {self.window_blocks}")
 
         # 建立帧字典，完美支持多相机与乱序
-        training_dataset = self.scene.getTrainCameras()
+        self.training_dataset = self.scene.getTrainCameras()
         self.frames_dict = {}
-        for idx, cam in enumerate(training_dataset):
+        for idx, cam in enumerate(self.training_dataset):
             try:
                 frame_id = int(cam.image_name.split('_')[-1])
             except:
@@ -112,8 +112,6 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians._start_frame[:] = start_frame
         self.gaussians._expire_frame[:] = end_frame
 
-        training_dataset = self.scene.getTrainCameras()
-        
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
@@ -142,7 +140,7 @@ class TrainerSWinGS(Trainer4DGS):
             for batch_idx in range(batch_size):
                 t_id = random.randint(start_frame, end_frame)
                 dataset_idx = random.choice(self.frames_dict[t_id])
-                gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                 gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
 
                 active_mask = self._get_active_dynamic_mask(t_id)
@@ -263,7 +261,6 @@ class TrainerSWinGS(Trainer4DGS):
         if hasattr(self.gaussians, 'set_mlp_requires_grad'):
             self.gaussians.set_mlp_requires_grad(False)
 
-        training_dataset = self.scene.getTrainCameras()
         finetune_iters = int(self.opt.finetune_iterations * self.opt.iterations)  # 细调迭代数 = 配置比例 * 每窗口总迭代数
         
         progress_bar = tqdm(range(1, finetune_iters + 1), desc=f"Win {win_idx} Phase 2")
@@ -282,7 +279,7 @@ class TrainerSWinGS(Trainer4DGS):
                 if is_consistency_step and overlap_image_cache is not None:
                     t_id = start_frame
                     dataset_idx = random.choice(self.frames_dict[t_id])
-                    gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                    gt_image, viewpoint_cam = self.window_cache[dataset_idx] # 【修改】从缓存读取
                     gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
                     
                     active_mask = self._get_active_dynamic_mask(t_id)
@@ -296,7 +293,7 @@ class TrainerSWinGS(Trainer4DGS):
                 else:
                     t_id = random.randint(start_frame, end_frame)
                     dataset_idx = random.choice(self.frames_dict[t_id])
-                    gt_image, viewpoint_cam = training_dataset[dataset_idx]
+                    gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                     gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
                     
                     active_mask = self._get_active_dynamic_mask(t_id)
@@ -338,8 +335,16 @@ class TrainerSWinGS(Trainer4DGS):
         # ==========================================
         for win_idx, (start, end) in enumerate(self.window_blocks):
             torch.cuda.empty_cache()
-
             gc.collect()
+
+            # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
+            self.window_cache = {}
+            for frame_id in range(start, end + 1):
+                if frame_id in self.frames_dict:
+                    for d_idx in self.frames_dict[frame_id]:
+                        if d_idx not in self.window_cache:
+                            self.window_cache[d_idx] = self.training_dataset[d_idx]
+
             # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
             with torch.no_grad():
                 if win_idx == 0:
@@ -351,21 +356,26 @@ class TrainerSWinGS(Trainer4DGS):
                     self.gaussians._expire_frame[alive_mask] = end
 
             self.train_phase1_window(win_idx, start, end)
+            self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
 
         # ==========================================
         # 大循环阶段二：时序一致性微调串联
         # ==========================================
-        training_dataset = self.scene.getTrainCameras()
-        
         for win_idx in range(1, len(self.window_blocks)):
             start, end = self.window_blocks[win_idx]
-            
+            # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
+            self.window_cache = {}
+            for frame_id in range(start, end + 1):
+                if frame_id in self.frames_dict:
+                    for d_idx in self.frames_dict[frame_id]:
+                        if d_idx not in self.window_cache:
+                            self.window_cache[d_idx] = self.training_dataset[d_idx]
             # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
             # 注: 如果代码库没有好的 restore 方法，建议先手动实现
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx-1}.pth")), self.opt)
             overlap_frame_id = start
             dataset_idx = random.choice(self.frames_dict[overlap_frame_id])
-            _, viewpoint_cam = training_dataset[dataset_idx]
+            _, viewpoint_cam = self.training_dataset[dataset_idx]
             viewpoint_cam = viewpoint_cam.cuda()
             
             with torch.no_grad():
@@ -383,6 +393,8 @@ class TrainerSWinGS(Trainer4DGS):
             
             self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
             torch.cuda.empty_cache()
+            gc.collect()
+            self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.global_iter}.pth")
