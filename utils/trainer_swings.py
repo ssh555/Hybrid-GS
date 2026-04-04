@@ -119,8 +119,8 @@ class TrainerSWinGS(Trainer4DGS):
             self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
         # 框定生命周期在当前窗口
-        # self.gaussians._start_frame[:] = start_frame
-        # self.gaussians._expire_frame[:] = end_frame
+        self.gaussians._start_frame[:] = start_frame
+        self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
