@@ -154,7 +154,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
     gaussians.restore(model_params, None)
 
-    server = viser.ViserServer(port=8080)
+    server = viser.ViserServer(port=8081)
 
 
     # ==========================================
