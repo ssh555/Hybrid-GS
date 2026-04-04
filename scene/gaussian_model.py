@@ -944,3 +944,10 @@ class GaussianModel:
         # 4. 将提取出的干净 3D 属性，永久焊死在 3D 静态高斯池中
         # (加入 static_xyz 并在优化器中注册独立的 3D 梯度)
         self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+
+
+        def set_mlp_requires_grad(self, requires_grad: bool):
+            """控制变形网络(MLP)的梯度开关，服务于 SWinGS 的 Warmup 阶段"""
+            if hasattr(self, 'deformation_network'):  # 把 deformation_network 换成你实际 MLP 的名字
+                for param in self.deformation_network.parameters():
+                    param.requires_grad = requires_grad
