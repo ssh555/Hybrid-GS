@@ -68,10 +68,12 @@ OptimizationParams:
   lambda_time: 0.001       # SWinGS: 时间一致性正则化惩罚系数
   tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.003            # HybridGS 硬约束：最大瞬时位移阈值
-  freeze_start: 0.2       # HybridGS 硬约束：冻结静态背景开始迭代比例
-  freeze_end: 0.5         # HybridGS 硬约束：冻结静态背景结束迭代比例
-  freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
+  freeze_start: 2000       # HybridGS 硬约束：冻结静态背景开始迭代次数
+  freeze_end: 6000         # HybridGS 硬约束：冻结静态背景结束迭代次数
+  freeze_internal: 500    # HybridGS 硬约束：冻结静态背景的迭代间隔
   lambda_d: 0.001             # HybridGS 软约束：位移收敛正则化系数
+  warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
+  warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
   warmup_iterations: 1500        # SWinGS Warmup 阶段开始迭代比例
   finetune_iterations: 1000   # SWinGS 细调阶段迭代比例 (在 Warmup 之后，全面开启时间一致性正则化)
   # ==========================================================
