@@ -249,7 +249,6 @@ class TrainerHybrid(TrainerSWinGS):
             if iteration == self.opt.iterations:
                 self.evaluate(self.global_iter, tag=f"Phase1_Win{win_idx}")
                 os.makedirs(self.args.model_path, exist_ok=True)
-                torch.save(self.gaussians.capture(), os.path.join(self.args.model_path, f"hybrid_phase1_win{win_idx}.pth"))
                 try: num_3d = self.gaussians.get_static_xyz.shape[0] if hasattr(self.gaussians, 'get_static_xyz') else 0
                 except: num_3d = 0
                 self.metrics_tracker.record_training_stats(self.global_iter, num_3d, self.gaussians.get_xyz.shape[0])
