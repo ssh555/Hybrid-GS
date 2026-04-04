@@ -127,8 +127,8 @@ class OptimizationParams(ParamGroup):
         self.freeze_start = 0.0       # HybridGS 硬约束：冻结静态背景开始迭代比例
         self.freeze_end = 1.0         # HybridGS 硬约束：冻结静态背景结束迭代比例
         self.freeze_internal = 1000     # HybridGS 硬约束：冻结静态背景的内部迭代次数 (每多少次迭代更新一次冻结掩码)
-        self.warmup_start = 0.0      # HybridGS 软约束：位移正则化开始迭代比例
-        self.warmup_end = 1.0         # HybridGS 软约束：位移正则化结束迭代比例
+        self.warmup_start = 0.1      # SWinGS Warmup 阶段开始迭代比例
+        self.finetune_iterations = 0.15         # SWinGS 细调阶段迭代比例 (在 Warmup 之后，全面开启时间一致性正则化)
 
         self.use_soft_constraint = True
         self.use_hard_constraint = True
