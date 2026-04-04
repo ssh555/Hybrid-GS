@@ -6,7 +6,7 @@ rot_4d: True
 force_sh_3d: True
 batch_size: 4
 exhaust_test: False
-start_checkpoint: "output/swings/miku_shaungxue_daxi/test_short/chkpnt_8000.pth"
+start_checkpoint: "output/swings/miku_shaungxue_daxi/test_short/chkpnt_9000.pth"
 
 ModelParams:
   sh_degree: 3
@@ -35,12 +35,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 8000
+  iterations: 9000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 8000
+  position_lr_max_steps: 9000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
