@@ -119,8 +119,8 @@ class TrainerSWinGS(Trainer4DGS):
             self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
         # 框定生命周期在当前窗口
-        self.gaussians._start_frame[:] = start_frame
-        self.gaussians._expire_frame[:] = end_frame
+        # self.gaussians._start_frame[:] = start_frame
+        # self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
@@ -410,6 +410,8 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
         self._save_checkpoint(str(self.opt.iterations))
 
+        self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
+        
         print("\n🎉 SWinGS 两阶段严格训练完成！正在生成图表...")
         
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
