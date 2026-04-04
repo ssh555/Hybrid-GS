@@ -218,12 +218,15 @@ class TrainerHybrid(TrainerSWinGS):
                 if iteration % self.opt.opacity_reset_interval == 0:
                     self.gaussians.reset_opacity()
 
-                # --- 硬约束判定 (保留你的原始逻辑) ---
+                # --- 硬约束判定 ---
                 freeze_start_iter = int(total_iters * self.opt.freeze_start)
                 freeze_end_iter = int(total_iters * self.opt.freeze_end)
                 if self.use_hard and iteration >= freeze_start_iter and iteration <= freeze_end_iter and iteration % self.opt.freeze_internal == 0:
-                    self.robust_hard_constraint_classifier(start_frame, end_frame)
-
+                    global_static_mask = self.robust_hard_constraint_classifier(start_frame, end_frame)
+                    # 【核心保护修改】：一旦转为背景静态点，强制它活到视频最后一帧！
+                    # 否则漫游渲染时走到后面的帧，背景会全部消失
+                    if global_static_mask is not None:
+                        self.gaussians._expire_frame[global_static_mask] = self.total_frames - 1
                 # 防止静态点更新
                 static_mask = (self.gaussians._mask_dynamic == 1)
                 if static_mask.any() and self.gaussians._t.grad is not None:

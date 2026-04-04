@@ -251,7 +251,6 @@ class TrainerSWinGS(Trainer4DGS):
                 if iteration == self.opt.iterations:
                     self.evaluate(iteration, tag=f"Phase1_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
-                    torch.save(self.gaussians.capture(), os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth"))
                     self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
 
         progress_bar.close()
@@ -327,7 +326,6 @@ class TrainerSWinGS(Trainer4DGS):
                 if iteration == finetune_iters:
                     self.evaluate(self.global_iter, tag=f"Phase2_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
-                    torch.save(self.gaussians.capture(), os.path.join(self.args.model_path, f"phase2_final_win{win_idx}.pth"))
                     self.gaussians.save_ply(os.path.join(self.args.model_path, f"final_point_cloud_win{win_idx}.ply"))
 
         progress_bar.close()
@@ -340,12 +338,18 @@ class TrainerSWinGS(Trainer4DGS):
         # ==========================================
         for win_idx, (start, end) in enumerate(self.window_blocks):
             torch.cuda.empty_cache()
+
             gc.collect()
-            
-            # (可选) 从上一个窗口继承 Canonical 权重以加速收敛
-            if win_idx > 0:
-                self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx-1}.pth")), self.opt)
-            
+            # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
+            with torch.no_grad():
+                if win_idx == 0:
+                    self.gaussians._start_frame[:] = start
+                    self.gaussians._expire_frame[:] = end
+                else:
+                    # 把依然存活的点的寿命延长到本窗口末尾
+                    alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
+                    self.gaussians._expire_frame[alive_mask] = end
+
             self.train_phase1_window(win_idx, start, end)
 
         # ==========================================
@@ -379,7 +383,11 @@ class TrainerSWinGS(Trainer4DGS):
             
             self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
             torch.cuda.empty_cache()
-            
+        
+        # 【修复2：训练完毕后保存全局唯一的大模型】
+        print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.global_iter}.pth")
+        self._save_checkpoint(str(self.global_iter))
+
         print("\n🎉 SWinGS 两阶段严格训练完成！正在生成图表...")
         
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
@@ -415,3 +423,17 @@ class TrainerSWinGS(Trainer4DGS):
             print(f"📊 [指标可视化] 联动图已保存至: {loss_plot_path}")
         except Exception as e:
             print(f"⚠️ [指标可视化] 绘制图表时发生错误: {e}")
+
+    def _save_checkpoint(self, name_suffix):
+        """【核心修复】标准 3DGS 漫游渲染器专用的保存格式"""
+        os.makedirs(self.args.model_path, exist_ok=True)
+        # 1. 保存包含 (模型参数, 迭代次数) 的元组，符合渲染器读取标准
+        save_path = os.path.join(self.args.model_path, f"chkpnt_{name_suffix}.pth")
+        torch.save((self.gaussians.capture(), self.global_iter), save_path)
+        
+        # 2. 生成标准的 point_cloud 目录结构
+        point_cloud_path = os.path.join(self.args.model_path, f"point_cloud/iteration_{name_suffix}/point_cloud.ply")
+        os.makedirs(os.path.dirname(point_cloud_path), exist_ok=True)
+        self.gaussians.save_ply(point_cloud_path)
+
+
