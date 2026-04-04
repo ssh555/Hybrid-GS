@@ -409,8 +409,10 @@ class TrainerSWinGS(Trainer4DGS):
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
         self._save_checkpoint(str(self.opt.iterations))
-
+        # 最终评估和记录
+        self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
         self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
+
         
         print("\n🎉 SWinGS 两阶段严格训练完成！正在生成图表...")
         
