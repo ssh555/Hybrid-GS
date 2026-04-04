@@ -27,8 +27,8 @@ class TrainerSWinGS(Trainer4DGS):
                 break
             curr_start = curr_end # 下一窗口的起点是本窗口的终点 (1帧重叠)
             
-        print(f"[TrainerSWinGS] 单卡严格串行模式初始化！总帧数: {self.total_frames}")
-        print(f"[TrainerSWinGS] 窗口规划: {self.window_blocks}")
+        print(f"[{self.__class__.__name__}] 单卡严格串行模式初始化！总帧数: {self.total_frames}")
+        print(f"[{self.__class__.__name__}] 窗口规划: {self.window_blocks}")
 
         # 建立帧字典，完美支持多相机与乱序
         self.training_dataset = self.scene.getTrainCameras()
@@ -109,7 +109,7 @@ class TrainerSWinGS(Trainer4DGS):
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
         """阶段一：独立训练当前窗口（使用 YAML 中的 self.opt.iterations）"""
-        print(f"\n🚀 开始 SWinGS 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
+        print(f"\n🚀 开始 {self.__class__.__name__} 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
         
         if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
             num_pts = self.gaussians.get_xyz.shape[0]
@@ -264,7 +264,7 @@ class TrainerSWinGS(Trainer4DGS):
 
     def train_phase2_finetune(self, win_idx, start_frame, end_frame, overlap_image_cache):
         """阶段二：时序一致性微调（使用 finetune_iterations 配置）"""
-        print(f"\n🔄 SWinGS 阶段 2: 时序微调窗口 {win_idx} [{start_frame}-{end_frame}]")
+        print(f"\n🔄 {self.__class__.__name__} 阶段 2: 时序微调窗口 {win_idx} [{start_frame}-{end_frame}]")
         
         # 冻结 MLP
         if hasattr(self.gaussians, 'set_mlp_requires_grad'):
@@ -414,9 +414,9 @@ class TrainerSWinGS(Trainer4DGS):
         self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
 
         
-        print("\n🎉 SWinGS 两阶段严格训练完成！正在生成图表...")
+        print(f"\n🎉 {self.__class__.__name__} 两阶段严格训练完成！正在生成图表...")
         
-        self.metrics_tracker.save_log(os.path.join(self.args.model_path, "swings_metrics.json"))
+        self.metrics_tracker.save_log(os.path.join(self.args.model_path, f"{self.__class__.__name__}_metrics.json"))
         self._draw_metrics_chart()
 
     def _draw_metrics_chart(self):

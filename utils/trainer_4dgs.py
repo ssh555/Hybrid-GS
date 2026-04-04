@@ -27,7 +27,7 @@ class Trainer4DGS(BaseTrainer):
         
         # 2. 初始化 Scene (携带 3D4DGS 特有参数)
         os.makedirs(self.args.model_path, exist_ok=True)
-        print("\n[Trainer4DGS] 正在通过 3D4DGS Scene 加载数据...")
+        print(f"\n[{self.__class__.__name__}] 正在通过 3D4DGS Scene 加载数据...")
         self.scene = Scene(
             self.dataset, 
             self.gaussians, 
