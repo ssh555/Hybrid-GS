@@ -261,7 +261,7 @@ class TrainerSWinGS(Trainer4DGS):
         if hasattr(self.gaussians, 'set_mlp_requires_grad'):
             self.gaussians.set_mlp_requires_grad(False)
 
-        finetune_iters = int(self.opt.finetune_iterations * self.opt.iterations)  # 细调迭代数 = 配置比例 * 每窗口总迭代数
+        finetune_iters = self.opt.finetune_iterations  # 细调迭代数 = 配置比例 * 每窗口总迭代数
         
         progress_bar = tqdm(range(1, finetune_iters + 1), desc=f"Win {win_idx} Phase 2")
         

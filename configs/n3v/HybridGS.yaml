@@ -75,7 +75,7 @@ OptimizationParams:
   warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
   warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
   warmup_iterations: 1500        # SWinGS Warmup 阶段开始迭代比例
-  finetune_iterations: 1000   # SWinGS 细调阶段迭代比例 (在 Warmup 之后，全面开启时间一致性正则化)
+  finetune_iterations: 1000      # SWinGS 细调阶段迭代数 (在 Warmup 之后，全面开启时间一致性正则化，进一步提升时间一致性)
   # ==========================================================
   # [毕设专属] 消融实验控制开关 (Ablation Switches)
   # ==========================================================
