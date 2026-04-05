@@ -110,16 +110,10 @@ class TrainerSWinGS(Trainer4DGS):
     def train_phase1_window(self, win_idx, start_frame, end_frame):
         """阶段一：独立训练当前窗口（使用 YAML 中的 self.opt.iterations）"""
         print(f"\n🚀 开始 {self.__class__.__name__} 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
-        
-        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
-            num_pts = self.gaussians.get_xyz.shape[0]
-            self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-            self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-            self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
         # 框定生命周期在当前窗口
-        self.gaussians._start_frame[:] = start_frame  
-        self.gaussians._expire_frame[:] = end_frame
+        # self.gaussians._start_frame[:] = start_frame  
+        # self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
@@ -354,7 +348,11 @@ class TrainerSWinGS(Trainer4DGS):
                     for d_idx in self.frames_dict[frame_id]:
                         if d_idx not in self.window_cache:
                             self.window_cache[d_idx] = self.training_dataset[d_idx]
-
+            if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+                num_pts = self.gaussians.get_xyz.shape[0]
+                self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+                self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+                self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
             # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
             with torch.no_grad():
                 if win_idx == 0:
@@ -398,8 +396,8 @@ class TrainerSWinGS(Trainer4DGS):
             
             # 2. 载入当前窗口 (w) 模型准备微调
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
-            self.gaussians._start_frame[:] = start
-            self.gaussians._expire_frame[:] = end
+            # self.gaussians._start_frame[:] = start
+            # self.gaussians._expire_frame[:] = end
             
             self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
             torch.cuda.empty_cache()

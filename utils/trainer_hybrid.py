@@ -69,15 +69,9 @@ class TrainerHybrid(TrainerSWinGS):
     def train_phase1_window(self, win_idx, start_frame, end_frame):
         """重写第一阶段：融入 Hybrid 软硬约束，并完美保留绘图与 YAML 配置"""
         print(f"\n🚀 开始 HybridGS 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
-        
-        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
-            num_pts = self.gaussians.get_xyz.shape[0]
-            self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-            self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-            self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
 
-        self.gaussians._start_frame[:] = start_frame
-        self.gaussians._expire_frame[:] = end_frame
+        # self.gaussians._start_frame[:] = start_frame  
+        # self.gaussians._expire_frame[:] = end_frame
 
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
