@@ -1,6 +1,6 @@
 gaussian_dim: 4
 time_duration: [0.0, 7]
-num_pts: 10_0000
+num_pts: 20_0000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: True
@@ -40,7 +40,7 @@ OptimizationParams:
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30000
+  position_lr_max_steps: 8000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -49,9 +49,9 @@ OptimizationParams:
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
   densification_interval: 100 
-  opacity_reset_interval: 30000
+  opacity_reset_interval: 3000
   densify_from_iter: 500 
-  densify_until_iter: 15000
+  densify_until_iter: 6000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: 2000000
