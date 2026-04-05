@@ -77,7 +77,12 @@ class TrainerSWinGS(Trainer4DGS):
             if end_frame is not None:
                 if frame_id < start_frame or frame_id > end_frame:
                     continue
-                    
+            for (w_start, w_end) in self.window_blocks:
+                if w_start <= frame_id <= w_end:
+                    # 渲染这帧前，把高斯的时间域切换到它对应的训练窗口
+                    self.gaussians._start_frame[:] = w_start
+                    self.gaussians._expire_frame[:] = w_end
+                    break
             if gt_image is not None: gt_image = gt_image.cuda()
             
             active_mask = self._get_active_dynamic_mask(frame_id)
@@ -393,11 +398,11 @@ class TrainerSWinGS(Trainer4DGS):
                 active_mask = self._get_active_dynamic_mask(overlap_frame_id)
                 render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
                 overlap_image_cache = render_pkg["render"].detach().clone()
-            
+
             # 2. 载入当前窗口 (w) 模型准备微调
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
-            # self.gaussians._start_frame[:] = start
-            # self.gaussians._expire_frame[:] = end
+            self.gaussians._start_frame[:] = start
+            self.gaussians._expire_frame[:] = end
             
             self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
             torch.cuda.empty_cache()
