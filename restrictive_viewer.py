@@ -302,10 +302,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                 if hasattr(gaussians, '_mask_dynamic'):
                     active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
 
-            try:
-                out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-            except TypeError:
-                out = render(view_cam, gaussians, pipe, background)
+            out = render(view_cam, gaussians, pipe, background)
 
             img = torch.clamp(out["render"], 0, 1)
             img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)

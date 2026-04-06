@@ -208,17 +208,8 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             view_cam.projection_matrix = proj
             view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
             view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
-            active_mask = None
-            if hasattr(gaussians, '_start_frame') and gaussians._start_frame.numel() > 0:
-                frame_id = int(slider_frame.value)
-                active_mask = (gaussians._start_frame <= frame_id) & (gaussians._expire_frame >= frame_id)
-                if hasattr(gaussians, '_mask_dynamic'):
-                    active_mask = (gaussians._mask_dynamic == 1) | ((gaussians._mask_dynamic != 1) & active_mask)
 
-            try:
-                out = render(view_cam, gaussians, pipe, background, active_dynamic_mask=active_mask)
-            except TypeError:
-                out = render(view_cam, gaussians, pipe, background)
+            out = render(view_cam, gaussians, pipe, background)
 
             img = torch.clamp(out["render"], 0, 1)
             img_np = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)

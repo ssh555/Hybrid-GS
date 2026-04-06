@@ -1,5 +1,6 @@
 # 文件：utils/trainer_swings.py
 import os
+import json
 import torch
 import random
 import gc
@@ -30,17 +31,51 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"[{self.__class__.__name__}] 单卡严格串行模式初始化！总帧数: {self.total_frames}")
         print(f"[{self.__class__.__name__}] 窗口规划: {self.window_blocks}")
 
-        # 建立帧字典，完美支持多相机与乱序
         self.training_dataset = self.scene.getTrainCameras()
-        self.frames_dict = {}
-        for idx, cam in enumerate(self.training_dataset):
-            try:
-                frame_id = int(cam.image_name.split('_')[-1])
-            except:
-                frame_id = getattr(cam, 'fid', idx % self.total_frames)
-            if frame_id not in self.frames_dict:
-                self.frames_dict[frame_id] = []
-            self.frames_dict[frame_id].append(idx)
+        test_cameras = self.scene.getTestCameras()
+        os.makedirs(self.args.model_path, exist_ok=True)
+        # 定义缓存文件路径 (存放在模型输出目录下)
+        cache_path = os.path.join(self.args.model_path, "frames_mapping_cache.json")
+
+        if os.path.exists(cache_path):
+            print(f"[{self.__class__.__name__}] ⚡ 命中缓存！正在从文件极速恢复帧映射关系...")
+            with open(cache_path, 'r') as f:
+                cache_data = json.load(f)
+            
+            # json 的 key 默认是 string，需要转回 int
+            self.frames_dict = {int(k): v for k, v in cache_data["train_frames_dict"].items()}
+            self.test_frame_ids = cache_data["test_frame_ids"]
+        else:
+            print(f"[{self.__class__.__name__}] ⏳ 未找到缓存，初次解析帧数据映射，可能需要一些时间...")
+            
+            # 1. 解析训练集
+            self.frames_dict = {}
+            for idx, cam in enumerate(self.training_dataset):
+                try:
+                    frame_id = int(cam.image_name.split('_')[-1])
+                except:
+                    frame_id = getattr(cam, 'fid', idx % self.total_frames)
+                if frame_id not in self.frames_dict:
+                    self.frames_dict[frame_id] = []
+                self.frames_dict[frame_id].append(idx)
+                
+            # 2. 解析测试集（提前把测试集的 frame_id 也提取出来存好）
+            self.test_frame_ids = []
+            if test_cameras:
+                for idx, cam in enumerate(test_cameras):
+                    try:
+                        frame_id = int(cam.image_name.split('_')[-1])
+                    except:
+                        frame_id = getattr(cam, 'fid', idx % self.total_frames)
+                    self.test_frame_ids.append(frame_id)
+                    
+            # 3. 写入缓存文件
+            with open(cache_path, 'w') as f:
+                json.dump({
+                    "train_frames_dict": self.frames_dict,
+                    "test_frame_ids": self.test_frame_ids
+                }, f)
+            print(f"[{self.__class__.__name__}] 💾 帧映射解析完成并已保存至: {cache_path}")
             
         self.window_cache = {}
         
@@ -71,8 +106,9 @@ class TrainerSWinGS(Trainer4DGS):
         
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
             gt_image, viewpoint_cam = batch_data
-            try: frame_id = int(viewpoint_cam.image_name.split('_')[-1])
-            except: frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
+            
+            # 【极速获取】直接从缓存的列表中读取 frame_id，省去耗时的字符串解析
+            frame_id = self.test_frame_ids[idx]
             # 直接跳过不属于当前窗口的测试帧！防止纯黑画面拉低平均分！
             if end_frame is not None:
                 if frame_id < start_frame or frame_id > end_frame:
