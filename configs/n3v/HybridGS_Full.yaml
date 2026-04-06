@@ -6,7 +6,7 @@ rot_4d: True
 force_sh_3d: True
 batch_size: 4
 exhaust_test: False
-start_checkpoint: "output/hybrid_gs/miku_shaungxue_daxi/full/chkpnt_8000.pth" # 2901*20 迭代25w,增值25w，80滑动窗口，最多400w点
+start_checkpoint: "output/hybrid_gs/miku_shaungxue_daxi/full/chkpnt_30000.pth" # 2901*20 迭代25w,增值25w，80滑动窗口，最多400w点
 
 ModelParams:
   sh_degree: 3
@@ -35,12 +35,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 8000
+  iterations: 30000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 8000
+  position_lr_max_steps: 30000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -51,10 +51,10 @@ OptimizationParams:
   densification_interval: 100 
   opacity_reset_interval: 3000
   densify_from_iter: 500 
-  densify_until_iter: 6000
+  densify_until_iter: 15000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 2000000
+  densify_until_num_points: 3500000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
@@ -64,14 +64,14 @@ OptimizationParams:
   # ==========================================================
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
-  swin_size: 80             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  lambda_time: 0.001       # SWinGS: 时间一致性正则化惩罚系数
+  swin_size: 102             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
+  lambda_time: 0.0005       # SWinGS: 时间一致性正则化惩罚系数
   tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.005            # HybridGS 硬约束：最大瞬时位移阈值
-  freeze_start: 2000       # HybridGS 硬约束：冻结静态背景开始迭代次数
-  freeze_end: 6000         # HybridGS 硬约束：冻结静态背景结束迭代次数
+  freeze_start: 3000       # HybridGS 硬约束：冻结静态背景开始迭代次数
+  freeze_end: 15000         # HybridGS 硬约束：冻结静态背景结束迭代次数
   freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
-  lambda_d: 0.001             # HybridGS 软约束：位移收敛正则化系数
+  lambda_d: 0.0005             # HybridGS 软约束：位移收敛正则化系数
   warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
   warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
   warmup_iterations: 1500        # SWinGS Warmup 阶段开始迭代比例
@@ -81,7 +81,7 @@ OptimizationParams:
   # ==========================================================
   use_soft_constraint: True   # 是否开启软约束 (运动速度惩罚)
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
-  replay_prob: 0.25        # SWinGS / HybridGS 经验回放概率
+  replay_prob: 0.75        # SWinGS / HybridGS 经验回放概率
 
 DebugParmas:
   save_ply_interval: -1

@@ -282,7 +282,7 @@ class TrainerSWinGS(Trainer4DGS):
             
             for batch_idx in range(batch_size):
                 # 75% 概率执行时序一致性约束，25% 正常训练 (MLP已被冻结，只微调 Canonical)
-                is_consistency_step = random.random() < 0.75
+                is_consistency_step = random.random() < self.opt.replay_prob
 
                 if is_consistency_step and overlap_image_cache is not None:
                     t_id = start_frame
