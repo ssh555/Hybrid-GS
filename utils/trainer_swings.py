@@ -90,14 +90,34 @@ class TrainerSWinGS(Trainer4DGS):
         self.pts_4d_history = []
         self.pts_3d_history = []
         self.global_iter = 0  # 全局迭代步数，用于贯穿所有窗口
+        self.psnr_history = []
+        self.ssim_history = []
+        self.fps_history = []
 
+    # def _get_active_dynamic_mask(self, frame_id):
+    #     if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+    #         return None
+    #     active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
+    #     if hasattr(self.gaussians, '_mask_dynamic'):
+    #         final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
+    #         return final_mask
+    #     return active_mask
     def _get_active_dynamic_mask(self, frame_id):
-        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+        if (
+            not hasattr(self.gaussians, "_start_frame")
+            or self.gaussians._start_frame.numel() == 0
+        ):
             return None
-        active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
-        if hasattr(self.gaussians, '_mask_dynamic'):
-            final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
-            return final_mask
+
+        active_mask = (
+            (self.gaussians._start_frame <= frame_id)
+            & (self.gaussians._expire_frame >= frame_id)
+        )
+
+        if hasattr(self.gaussians, "_mask_dynamic"):
+            dynamic_mask = self.gaussians._mask_dynamic != 0
+            return dynamic_mask & active_mask
+
         return active_mask
 
     @torch.no_grad()
@@ -112,18 +132,22 @@ class TrainerSWinGS(Trainer4DGS):
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
             gt_image, viewpoint_cam = batch_data
             
-            # 【极速获取】直接从缓存的列表中读取 frame_id，省去耗时的字符串解析
-            frame_id = self.test_frame_ids[idx]
+            # # 【极速获取】直接从缓存的列表中读取 frame_id，省去耗时的字符串解析
+            # frame_id = self.test_frame_ids[idx]
+            try:
+                frame_id = int(viewpoint_cam.image_name.split('_')[-1])
+            except:
+                frame_id = getattr(viewpoint_cam, 'fid', idx % self.total_frames)
             # 直接跳过不属于当前窗口的测试帧！防止纯黑画面拉低平均分！
             if end_frame is not None:
                 if frame_id < start_frame or frame_id > end_frame:
                     continue
-            for (w_start, w_end) in self.window_blocks:
-                if w_start <= frame_id <= w_end:
-                    # 渲染这帧前，把高斯的时间域切换到它对应的训练窗口
-                    self.gaussians._start_frame[:] = w_start
-                    self.gaussians._expire_frame[:] = w_end
-                    break
+            # for (w_start, w_end) in self.window_blocks:
+            #     if w_start <= frame_id <= w_end:
+            #         # 渲染这帧前，把高斯的时间域切换到它对应的训练窗口
+            #         self.gaussians._start_frame[:] = w_start
+            #         self.gaussians._expire_frame[:] = w_end
+            #         break
             if gt_image is not None: gt_image = gt_image.cuda()
             
             active_mask = self._get_active_dynamic_mask(frame_id)
@@ -151,6 +175,9 @@ class TrainerSWinGS(Trainer4DGS):
         avg_fps = total_fps / valid_frames_count
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
+        self.psnr_history.append(avg_psnr)
+        self.ssim_history.append(avg_ssim)
+        self.fps_history.append(avg_fps)
         print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
@@ -481,8 +508,12 @@ class TrainerSWinGS(Trainer4DGS):
         self._save_merged_checkpoint(str(self.opt.iterations))
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
-        self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
-
+        # self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
+        avg_psnr = self.psnr_history.mean().item() if self.psnr_history else 0.0
+        avg_ssim = self.ssim_history.mean().item() if self.ssim_history else 0.0
+        avg_fps = self.fps_history.mean().item() if self.fps_history else 0.0
+        self.metrics_tracker.record_eval_metrics(self.global_iter, avg_psnr, avg_ssim, avg_fps)
+        print(f"[INFO] [最终评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
         
         print(f"\n🎉 {self.__class__.__name__} 两阶段严格训练完成！正在生成图表...")
         
