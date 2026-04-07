@@ -37,6 +37,11 @@ class TrainerSWinGS(Trainer4DGS):
         # 定义缓存文件路径 (存放在模型输出目录下)
         cache_path = os.path.join(self.args.model_path, "frames_mapping_cache.json")
 
+        self.reset_pth_path = os.path.join(self.args.model_path, "initial_checkpoint.pth")
+        torch.save((self.gaussians.capture(), 0), self.reset_pth_path)  # 保存初始模型参数，供每个窗口训练前重置使用
+
+        # self.gaussians.save_ply(self.reset_ply_path)  # 保存初始点云，供每个窗口训练前重置使用
+
         if os.path.exists(cache_path):
             print(f"[{self.__class__.__name__}] ⚡ 命中缓存！正在从文件极速恢复帧映射关系...")
             with open(cache_path, 'r') as f:
@@ -372,6 +377,11 @@ class TrainerSWinGS(Trainer4DGS):
 
         progress_bar.close()
 
+    def _reset_gaussian(self):
+        """【核心修复】重置高斯 MLP 权重，防止过拟合局部窗口"""
+        (model_params, _) = torch.load(self.reset_pth_path, weights_only=False)
+        self.gaussians.restore(model_params, self.opt)
+
     def train(self):
         self.metrics_tracker.start_timer()
         
@@ -403,8 +413,13 @@ class TrainerSWinGS(Trainer4DGS):
             #         # 把依然存活的点的寿命延长到本窗口末尾
             #         alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
             #         self.gaussians._expire_frame[alive_mask] = end
-
             self.train_phase1_window(win_idx, start, end)
+            
+            # 必须在第一阶段结束时持久化局部窗口模型
+            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+            os.makedirs(os.path.dirname(_path), exist_ok=True)
+            torch.save(self.gaussians.capture(), _path)
+            self._reset_gaussian()
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
 
         # ==========================================
@@ -428,6 +443,10 @@ class TrainerSWinGS(Trainer4DGS):
             viewpoint_cam = viewpoint_cam.cuda()
             
             with torch.no_grad():
+                # 正确载入前一窗口 (w-1) 提取渲染监督图像的模型参数
+                _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth")
+                (prev_model_data, _) = torch.load(_path, weights_only=False)
+                self.gaussians.restore(prev_model_data, self.opt)
                 # 注意这里要切回 w-1 对应的激活掩码
                 self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
                 self.gaussians._expire_frame[:] = self.window_blocks[win_idx-1][1]
@@ -436,18 +455,26 @@ class TrainerSWinGS(Trainer4DGS):
                 overlap_image_cache = render_pkg["render"].detach().clone()
 
             # 2. 载入当前窗口 (w) 模型准备微调
+            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+            (curr_model_data, _) = torch.load(_path, weights_only=False)
+            self.gaussians.restore(curr_model_data, self.opt)
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
             self.gaussians._start_frame[:] = start
             self.gaussians._expire_frame[:] = end
             
             self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
+            # 保存微调后的结果
+            _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
+            os.makedirs(os.path.dirname(_path), exist_ok=True)
+            torch.save(self.gaussians.capture(), _path)
             torch.cuda.empty_cache()
             gc.collect()
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
-        self._save_checkpoint(str(self.opt.iterations))
+        # self._save_checkpoint(str(self.opt.iterations))
+        self._save_merged_checkpoint(str(self.opt.iterations))
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
         self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
@@ -502,3 +529,26 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians.save_ply(point_cloud_path)
 
 
+    def _save_merged_checkpoint(self, name_suffix):
+        """【核心修复】因为是多窗口多 MLP，不再能用单一 3DGS 格式。打包所有窗口状态。"""
+        os.makedirs(self.args.model_path, exist_ok=True)
+        
+        merged_windows = {}
+        for win_idx in range(len(self.window_blocks)):
+            if win_idx == 0:
+                path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+            else:
+                path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
+            
+            if os.path.exists(path):
+                merged_windows[win_idx] = torch.load(path)
+                
+        final_super_dict = {
+            "is_swings_sequence": True,  # 渲染器读取标志
+            "window_blocks": self.window_blocks,
+            "models": merged_windows
+        }
+        
+        save_path = os.path.join(self.args.model_path, f"chkpnt_{name_suffix}.pth")
+        torch.save((final_super_dict, self.global_iter), save_path)
+        print(f"✅ 多窗口漫游超级大模型已保存至: {save_path}")
