@@ -143,12 +143,12 @@ class TrainerSWinGS(Trainer4DGS):
             if end_frame is not None:
                 if frame_id < start_frame or frame_id > end_frame:
                     continue
-            # for (w_start, w_end) in self.window_blocks:
-            #     if w_start <= frame_id <= w_end:
-            #         # 渲染这帧前，把高斯的时间域切换到它对应的训练窗口
-            #         self.gaussians._start_frame[:] = w_start
-            #         self.gaussians._expire_frame[:] = w_end
-            #         break
+            for (w_start, w_end) in self.window_blocks:
+                if w_start <= frame_id <= w_end:
+                    # 渲染这帧前，把高斯的时间域切换到它对应的训练窗口
+                    self.gaussians._start_frame[:] = w_start
+                    self.gaussians._expire_frame[:] = w_end
+                    break
             if gt_image is not None: gt_image = gt_image.cuda()
             
             active_mask = self._get_active_dynamic_mask(frame_id)
@@ -436,15 +436,15 @@ class TrainerSWinGS(Trainer4DGS):
                 self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
                 self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
                 self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
-            # # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
-            # with torch.no_grad():
-            #     if win_idx == 0:
-            #         self.gaussians._start_frame[:] = start
-            #         self.gaussians._expire_frame[:] = end
-            #     else:
-            #         # 把依然存活的点的寿命延长到本窗口末尾
-            #         alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
-            #         self.gaussians._expire_frame[alive_mask] = end
+            # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
+            with torch.no_grad():
+                if win_idx == 0:
+                    self.gaussians._start_frame[:] = start
+                    self.gaussians._expire_frame[:] = end
+                else:
+                    # 把依然存活的点的寿命延长到本窗口末尾
+                    alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
+                    self.gaussians._expire_frame[alive_mask] = end
             self.train_phase1_window(win_idx, start, end)
             
             # 必须在第一阶段结束时持久化局部窗口模型
