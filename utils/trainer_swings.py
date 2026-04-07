@@ -90,9 +90,10 @@ class TrainerSWinGS(Trainer4DGS):
         self.pts_4d_history = []
         self.pts_3d_history = []
         self.global_iter = 0  # 全局迭代步数，用于贯穿所有窗口
-        self.psnr_history = []
-        self.ssim_history = []
-        self.fps_history = []
+        self.eval_psnr_sum = 0.0
+        self.eval_ssim_sum = 0.0
+        self.eval_fps_sum = 0.0
+        self.eval_frame_count = 0
 
     # def _get_active_dynamic_mask(self, frame_id):
     #     if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
@@ -175,9 +176,10 @@ class TrainerSWinGS(Trainer4DGS):
         avg_fps = total_fps / valid_frames_count
         
         self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
-        self.psnr_history.append(avg_psnr)
-        self.ssim_history.append(avg_ssim)
-        self.fps_history.append(avg_fps)
+        self.eval_psnr_sum += total_psnr
+        self.eval_ssim_sum += total_ssim
+        self.eval_fps_sum += total_fps
+        self.eval_frame_count += valid_frames_count
         print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
@@ -509,9 +511,9 @@ class TrainerSWinGS(Trainer4DGS):
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
         # self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
-        avg_psnr = self.psnr_history.mean().item() if self.psnr_history else 0.0
-        avg_ssim = self.ssim_history.mean().item() if self.ssim_history else 0.0
-        avg_fps = self.fps_history.mean().item() if self.fps_history else 0.0
+        avg_psnr = self.eval_psnr_sum / max(self.eval_frame_count, 1)
+        avg_ssim = self.eval_ssim_sum / max(self.eval_frame_count, 1)
+        avg_fps = self.eval_fps_sum / max(self.eval_frame_count, 1)
         self.metrics_tracker.record_eval_metrics(self.global_iter, avg_psnr, avg_ssim, avg_fps)
         print(f"[INFO] [最终评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
         
