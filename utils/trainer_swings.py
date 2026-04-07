@@ -153,8 +153,8 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"\n🚀 开始 {self.__class__.__name__} 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
 
         # 框定生命周期在当前窗口
-        # self.gaussians._start_frame[:] = start_frame  
-        # self.gaussians._expire_frame[:] = end_frame
+        self.gaussians._start_frame[:] = start_frame  
+        self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
@@ -394,15 +394,15 @@ class TrainerSWinGS(Trainer4DGS):
                 self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
                 self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
                 self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
-            # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
-            with torch.no_grad():
-                if win_idx == 0:
-                    self.gaussians._start_frame[:] = start
-                    self.gaussians._expire_frame[:] = end
-                else:
-                    # 把依然存活的点的寿命延长到本窗口末尾
-                    alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
-                    self.gaussians._expire_frame[alive_mask] = end
+            # # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
+            # with torch.no_grad():
+            #     if win_idx == 0:
+            #         self.gaussians._start_frame[:] = start
+            #         self.gaussians._expire_frame[:] = end
+            #     else:
+            #         # 把依然存活的点的寿命延长到本窗口末尾
+            #         alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
+            #         self.gaussians._expire_frame[alive_mask] = end
 
             self.train_phase1_window(win_idx, start, end)
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
