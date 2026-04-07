@@ -95,31 +95,31 @@ class TrainerSWinGS(Trainer4DGS):
         self.eval_fps_sum = 0.0
         self.eval_frame_count = 0
 
-    # def _get_active_dynamic_mask(self, frame_id):
-    #     if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
-    #         return None
-    #     active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
-    #     if hasattr(self.gaussians, '_mask_dynamic'):
-    #         final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
-    #         return final_mask
-    #     return active_mask
     def _get_active_dynamic_mask(self, frame_id):
-        if (
-            not hasattr(self.gaussians, "_start_frame")
-            or self.gaussians._start_frame.numel() == 0
-        ):
+        if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
             return None
-
-        active_mask = (
-            (self.gaussians._start_frame <= frame_id)
-            & (self.gaussians._expire_frame >= frame_id)
-        )
-
-        if hasattr(self.gaussians, "_mask_dynamic"):
-            dynamic_mask = self.gaussians._mask_dynamic != 0
-            return dynamic_mask & active_mask
-
+        active_mask = (self.gaussians._start_frame <= frame_id) & (self.gaussians._expire_frame >= frame_id)
+        if hasattr(self.gaussians, '_mask_dynamic'):
+            final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
+            return final_mask
         return active_mask
+    # def _get_active_dynamic_mask(self, frame_id):
+    #     if (
+    #         not hasattr(self.gaussians, "_start_frame")
+    #         or self.gaussians._start_frame.numel() == 0
+    #     ):
+    #         return None
+
+    #     active_mask = (
+    #         (self.gaussians._start_frame <= frame_id)
+    #         & (self.gaussians._expire_frame >= frame_id)
+    #     )
+
+    #     if hasattr(self.gaussians, "_mask_dynamic"):
+    #         dynamic_mask = self.gaussians._mask_dynamic != 0
+    #         return dynamic_mask & active_mask
+
+    #     return active_mask
 
     @torch.no_grad()
     def evaluate(self, iteration, start_frame=0, end_frame=None, tag=""):
