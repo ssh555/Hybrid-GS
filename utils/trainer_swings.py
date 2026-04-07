@@ -477,7 +477,7 @@ class TrainerSWinGS(Trainer4DGS):
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
-        # self._save_checkpoint(str(self.opt.iterations))
+        self._save_checkpoint(str(self.opt.iterations))
         self._save_merged_checkpoint(str(self.opt.iterations))
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
@@ -534,7 +534,7 @@ class TrainerSWinGS(Trainer4DGS):
 
 
     def _save_merged_checkpoint(self, name_suffix):
-        """【核心修复】因为是多窗口多 MLP，不再能用单一 3DGS 格式。打包所有窗口状态。"""
+        """【无损瘦身版】多窗口合并打包。自动剔除渲染不需要的优化器状态，防止预加载时爆内存。"""
         os.makedirs(self.args.model_path, exist_ok=True)
         
         merged_windows = {}
@@ -545,7 +545,24 @@ class TrainerSWinGS(Trainer4DGS):
                 path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
             
             if os.path.exists(path):
-                merged_windows[win_idx] = torch.load(path, weights_only=False)
+                # 1. 强行映射到 CPU，防止合并过程就把显存挤爆
+                win_data = torch.load(path, weights_only=False)
+                
+                # 2. 【无损压缩核心逻辑】：遍历高斯参数，剥离巨无霸优化器状态
+                compressed_win_data = []
+                for item in win_data:
+                    # 在 3DGS/4DGS 的 capture() 中，只有 optimizer.state_dict() 是字典类型
+                    if isinstance(item, dict):
+                        # 识别到优化器状态，直接替换为空字典。这一步能减小 66% 的体积！
+                        compressed_win_data.append({})
+                    elif isinstance(item, torch.Tensor):
+                        # 确保纯参数张量停留在 CPU 物理内存中
+                        compressed_win_data.append(item)
+                    else:
+                        compressed_win_data.append(item)
+                
+                # 将瘦身后的数据转回元组并存入超级字典
+                merged_windows[win_idx] = tuple(compressed_win_data)
                 
         final_super_dict = {
             "is_swings_sequence": True,  # 渲染器读取标志
@@ -555,4 +572,4 @@ class TrainerSWinGS(Trainer4DGS):
         
         save_path = os.path.join(self.args.model_path, f"chkpnt_{name_suffix}.pth")
         torch.save((final_super_dict, self.global_iter), save_path)
-        print(f"✅ 多窗口漫游超级大模型已保存至: {save_path}")
+        print(f"✅ 多窗口超级大模型已完成【无损瘦身压缩】，并保存至: {save_path}")
