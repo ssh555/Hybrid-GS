@@ -1,3 +1,4 @@
+# restrictive_viewer.py
 import time
 import math
 import torch
@@ -17,30 +18,22 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProject
 class RenderCam:
     def __init__(self, base_cam):
         self.base_cam = base_cam
-        # 1. 拷贝渲染器 (render) 强制需要的核心标量
         self.image_width = base_cam.image_width
         self.image_height = base_cam.image_height
         self.FoVx = base_cam.FoVx
         self.FoVy = base_cam.FoVy
         self.timestamp = base_cam.timestamp
         
-        # 2. 核心防御：使用 .clone() 彻底拷贝张量数据，断开与 base_cam 的显存引用
         self.world_view_transform = base_cam.world_view_transform.clone()
         self.projection_matrix = base_cam.projection_matrix.clone()
         self.full_proj_transform = base_cam.full_proj_transform.clone()
         self.camera_center = base_cam.camera_center.clone()
         
-        # 3. 拷贝其他杂项以防万一
         self.uid = getattr(base_cam, 'uid', 0)
         self.image_name = getattr(base_cam, 'image_name', 'roam_cam')
         self.gt_alpha_mask = getattr(base_cam, 'gt_alpha_mask', None)
         
     def get_rays(self):
-        """
-        原生重写射线生成逻辑，使用当前 RenderCam 自身的物理属性，
-        彻底杜绝 __getattr__ 带来的隐式上下文穿透！
-        """
-        # 使用纯 PyTorch 生成网格，避免依赖 Kornia
         y, x = torch.meshgrid(torch.arange(self.image_height), torch.arange(self.image_width), indexing='ij')
         x = (x.float() + 0.5).cuda()
         y = (y.float() + 0.5).cuda()
@@ -58,7 +51,6 @@ class RenderCam:
         
         return self.camera_center[None, None], directions / torch.norm(directions, dim=-1, keepdim=True)
 
-    # 打印RenderCame和base_cam的核心参数对比，验证是否成功断开引用
     def PrintSelfInfo(self):
         print("=== RenderCam 核心参数 ===")
         print(f"Image Size: {self.image_width}x{self.image_height}")
@@ -68,15 +60,6 @@ class RenderCam:
         print(f"World-View Transform (first 3 rows):\n{self.world_view_transform.cpu().numpy()[:3]}")
         print(f"Projection Matrix (first 3 rows):\n{self.projection_matrix.cpu().numpy()[:3]}")
         print("===========================")
-        print("=== BaseCam 核心参数 ===")
-        print(f"Image Size: {self.base_cam.image_width}x{self.base_cam.image_height}")
-        print(f"FoV: ({self.base_cam.FoVx:.2f}, {self.base_cam.FoVy:.2f})")
-        print(f"Timestamp: {self.base_cam.timestamp}")
-        print(f"Camera Center: {self.base_cam.camera_center.cpu().numpy()}")
-        print(f"World-View Transform (first 3 rows):\n{self.base_cam.world_view_transform.cpu().numpy()[:3]}")
-        print(f"Projection Matrix (first 3 rows):\n{self.base_cam.projection_matrix.cpu().numpy()[:3]}")
-        print("===========================")
-
 
 # ==============================
 # Utils
@@ -88,16 +71,13 @@ def get_c2w(cam):
     return c2w
 
 def slerp(q0, q1, t):
-    """标准的四元数球面线性插值 (Spherical Linear Interpolation)"""
     dot = np.sum(q0 * q1)
-    # 确保走最短路径，防止镜头翻转
     if dot < 0.0:
         q1 = -q1
         dot = -dot
     
     DOT_THRESHOLD = 0.9995
     if dot > DOT_THRESHOLD:
-        # 如果极度接近，退化为普通线性插值
         res = q0 + t * (q1 - q0)
         return res / np.linalg.norm(res)
         
@@ -151,11 +131,23 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     max_cams = len(view_cams)
     print(f"[渲染器] 数据集解析完成，共 {max_cams} 个视角，每个视角 {max_frames} 帧。")
 
-    model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
-    gaussians.restore(model_params, None)
+    # ==========================================
+    # 核心修改 1：支持超级大模型的读取
+    # ==========================================
+    print(f"[渲染器] 正在读取模型权重: {args.start_checkpoint}")
+    checkpoint_data, _ = torch.load(args.start_checkpoint, weights_only=False)
+    is_swings = isinstance(checkpoint_data, dict) and checkpoint_data.get("is_swings_sequence", False)
+    
+    if is_swings:
+        print("[渲染器] 🚀 检测到 SWinGS 长序列超级大模型！将根据时间轴动态加载基底！")
+        window_blocks = checkpoint_data["window_blocks"]
+        models_dict = checkpoint_data["models"]
+        current_loaded_win_idx = -1
+    else:
+        print("[渲染器] 📌 检测到传统单体模型，正在直接恢复权重...")
+        gaussians.restore(checkpoint_data, None)
 
     server = viser.ViserServer(port=8081)
-
 
     # ==========================================
     # 🎬 UI 控制台
@@ -191,11 +183,9 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
 
     @server.on_client_connect
     def on_client_connect(client):
-        # 获取初始相机位置（使用选中的相机）
-        selected_cam = view_cams[max_cams // 2][0]  # 使用第一帧
+        selected_cam = view_cams[max_cams // 2][0]  
         c2w_gl = get_c2w(selected_cam)
         
-        # 设置客户端相机位置和姿态
         client.camera.position = c2w_gl[:3, 3]
         client.camera.wxyz = tf.SO3.from_matrix(c2w_gl[:3, :3]).wxyz
 
@@ -214,11 +204,28 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             slider_frame.value %= max_frames
 
         frame_idx = int(slider_frame.value)
+        
+        # ==========================================
+        # 核心修改 2：帧级动态参数切换逻辑
+        # ==========================================
+        if is_swings:
+            target_win_idx = 0
+            for w_idx, (w_start, w_end) in enumerate(window_blocks):
+                if w_start <= frame_idx <= w_end:
+                    target_win_idx = w_idx
+                    break
+                    
+            if target_win_idx != current_loaded_win_idx:
+                gaussians.restore(models_dict[target_win_idx], None)
+                current_loaded_win_idx = target_win_idx
+                if hasattr(gaussians, '_start_frame'):
+                    gaussians._start_frame[:] = window_blocks[target_win_idx][0]
+                    gaussians._expire_frame[:] = window_blocks[target_win_idx][1]
+
 
         for client in server.get_clients().values():
             scale = gui_res_scale.value
             browser_aspect = client.camera.aspect
-            frame_idx = int(slider_frame.value)
             
             u = gui_cam_interp.value
             idx_A = int(math.floor(u))
@@ -238,27 +245,17 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             q_interp = slerp(q_A, q_B, alpha)
             R_interp = tf.SO3(q_interp).as_matrix()
 
-            # ==========================================================
-            # 🌟 观众席位移模拟计算
-            # ==========================================================
             dx = gui_offset_x.value
             dy = gui_offset_y.value
             dz = gui_offset_z.value
             
-            # 构建局部偏移向量。在 OpenGL 相机坐标系中：
-            # X 正向是右，Y 正向是上，Z 负向是镜头正前方 (所以 dz 给它取反，让正数代表往前靠)
             local_offset = np.array([dx, dy, -dz], dtype=np.float32)
-            
-            # 局部偏移 乘以 相机的旋转矩阵 = 世界空间下的绝对偏移
             world_offset = R_interp @ local_offset
-            
-            # 基础插值坐标 + 绝对偏移 = 最终实际的机位
             pos_final = pos_interp + world_offset
-            # ==========================================================
 
             c2w_interp_gl = np.eye(4, dtype=np.float32)
             c2w_interp_gl[:3, :3] = R_interp
-            c2w_interp_gl[:3, 3] = pos_final # <-- 换成带有偏移的 pos_final
+            c2w_interp_gl[:3, 3] = pos_final 
 
             c2w_interp_cv = c2w_interp_gl.copy()
             c2w_interp_cv[:, 1:3] *= -1 
@@ -289,8 +286,6 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             view_cam.projection_matrix = proj.cuda()
             view_cam.full_proj_transform = (view_cam.world_view_transform.unsqueeze(0).bmm(view_cam.projection_matrix.unsqueeze(0))).squeeze(0)
             view_cam.camera_center = view_cam.world_view_transform.inverse()[3, :3]
-
-            # view_cam.PrintSelfInfo()
 
             client.camera.position = pos_final
             client.camera.wxyz = q_interp
@@ -331,7 +326,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
 
     parser.add_argument("--config", required=True)
-    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
+    parser.add_argument("--start_checkpoint", type=str, default = None)
 
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5,0.5])

@@ -389,6 +389,9 @@ class TrainerSWinGS(Trainer4DGS):
         # 大循环阶段一：按顺序独立训练所有窗口
         # ==========================================
         for win_idx, (start, end) in enumerate(self.window_blocks):
+            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+            if os.path.exists(_path):
+                continue  # 跳过已完成的窗口
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -426,6 +429,9 @@ class TrainerSWinGS(Trainer4DGS):
         # 大循环阶段二：时序一致性微调串联
         # ==========================================
         for win_idx in range(1, len(self.window_blocks)):
+            _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
+            if os.path.exists(_path):
+                continue  # 跳过已完成的窗口
             start, end = self.window_blocks[win_idx]
             # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
             self.window_cache = {}
@@ -435,8 +441,6 @@ class TrainerSWinGS(Trainer4DGS):
                         if d_idx not in self.window_cache:
                             self.window_cache[d_idx] = self.training_dataset[d_idx]
             # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
-            # 注: 如果代码库没有好的 restore 方法，建议先手动实现
-            # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx-1}.pth")), self.opt)
             overlap_frame_id = start
             dataset_idx = random.choice(self.frames_dict[overlap_frame_id])
             _, viewpoint_cam = self.training_dataset[dataset_idx]
@@ -445,7 +449,7 @@ class TrainerSWinGS(Trainer4DGS):
             with torch.no_grad():
                 # 正确载入前一窗口 (w-1) 提取渲染监督图像的模型参数
                 _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth")
-                (prev_model_data, _) = torch.load(_path, weights_only=False)
+                prev_model_data = torch.load(_path, weights_only=False)
                 self.gaussians.restore(prev_model_data, self.opt)
                 # 注意这里要切回 w-1 对应的激活掩码
                 self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
@@ -456,7 +460,7 @@ class TrainerSWinGS(Trainer4DGS):
 
             # 2. 载入当前窗口 (w) 模型准备微调
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            (curr_model_data, _) = torch.load(_path, weights_only=False)
+            curr_model_data = torch.load(_path, weights_only=False)
             self.gaussians.restore(curr_model_data, self.opt)
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
             self.gaussians._start_frame[:] = start
@@ -541,7 +545,7 @@ class TrainerSWinGS(Trainer4DGS):
                 path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
             
             if os.path.exists(path):
-                merged_windows[win_idx] = torch.load(path)
+                merged_windows[win_idx] = torch.load(path, weights_only=False)
                 
         final_super_dict = {
             "is_swings_sequence": True,  # 渲染器读取标志

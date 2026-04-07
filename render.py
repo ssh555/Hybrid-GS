@@ -1,4 +1,4 @@
-# 纯净版：自动分组单视角动态渲染 (严格空间判定版)
+# 纯净版：自动分组单视角动态渲染 (严格空间判定版) + SWinGS 超级模型支持
 import os
 import torch
 import imageio
@@ -27,31 +27,40 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
     train_cameras = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
 
     checkpoint = args.start_checkpoint or os.path.join(dataset.model_path, "chkpnt_6000.pth")
-    print(f"[渲染器] 正在覆盖模型权重: {checkpoint}")
-    (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
-    gaussians.restore(model_params, None)
+    print(f"[渲染器] 正在读取模型权重: {checkpoint}")
+    
+    # 【核心修改 1：支持读取超级大模型字典】
+    checkpoint_data, first_iter = torch.load(checkpoint, weights_only=False)
+    
+    is_swings = isinstance(checkpoint_data, dict) and checkpoint_data.get("is_swings_sequence", False)
+    
+    if is_swings:
+        print("[渲染器] 🚀 检测到 SWinGS 长序列超级大模型！将根据时间轴动态加载基底！")
+        window_blocks = checkpoint_data["window_blocks"]
+        models_dict = checkpoint_data["models"]
+        current_loaded_win_idx = -1
+    else:
+        print("[渲染器] 📌 检测到传统单体模型，正在直接恢复权重...")
+        gaussians.restore(checkpoint_data, None)
     
     # ==========================================
     # 核心逻辑：智能分离出【同一个视角】的所有时间帧
     # ==========================================
     print(f"[渲染器] 数据集共有 {len(train_cameras)} 个样本。正在智能聚类单视角...")
     
-    # 我们以第 1 个相机的空间位置为基准 (View 0)
     base_cam = train_cameras[int(len(train_cameras) / 2)]
     base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
-    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R # [新增] 获取基准相机的旋转矩阵
+    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R 
     
     view_0_cameras = []
     
     for cam in train_cameras:
         cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R # [新增] 获取当前相机的旋转矩阵
+        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R 
         
-        # [核心修复] 必须位置(T)和旋转角度(R)都极其接近（误差小于1e-5），才被认定是绝对的同一个静态视角
         if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
             view_0_cameras.append(cam)
             
-    # 按时间戳或帧号(fid)排序，确保时间是顺流的
     view_0_cameras.sort(key=lambda x: getattr(x, 'fid', getattr(x, 'timestamp', 0)))
     
     print(f"[渲染器] 成功提取到基准视角的 {len(view_0_cameras)} 帧连续画面！")
@@ -64,13 +73,37 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
     frames_rgb = []
     
     for idx, cam in enumerate(tqdm(view_0_cameras, desc="Rendering Sequence")):
+        
+        # 【核心修改 2：帧级动态参数切换逻辑】
+        if is_swings:
+            # 1. 解析当前帧是第几帧
+            try:
+                frame_id = int(cam.image_name.split('_')[-1])
+            except:
+                frame_id = getattr(cam, 'fid', idx)
+            
+            # 2. 找到当前帧所属的时间窗口
+            target_win_idx = 0
+            for w_idx, (w_start, w_end) in enumerate(window_blocks):
+                if w_start <= frame_id <= w_end:
+                    target_win_idx = w_idx
+                    break
+                    
+            # 3. 如果当前帧进入了新的窗口，立刻切换高斯模型参数（毫秒级切换，不影响渲染速度）
+            if target_win_idx != current_loaded_win_idx:
+                gaussians.restore(models_dict[target_win_idx], None)
+                current_loaded_win_idx = target_win_idx
+                
+                # 同步更新生命周期掩码（服务于你的 Hybrid 逻辑）
+                if hasattr(gaussians, '_start_frame'):
+                    gaussians._start_frame[:] = window_blocks[target_win_idx][0]
+                    gaussians._expire_frame[:] = window_blocks[target_win_idx][1]
+
+        # 4. 执行渲染
         render_pkg = render(cam, gaussians, pipe, background)
         rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
         img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
         
-        # 使用相机自带的 image_name (包含视角和帧号信息) 进行标注保存！
-        # cam_name = getattr(cam, 'image_name', f"frame_{idx:03d}")
-        # imageio.imwrite(os.path.join(render_dir, f"{cam_name}.png"), img_np)
         frames_rgb.append(img_np)
 
     video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
@@ -87,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--rot_4d", action="store_true", default=True)
     parser.add_argument("--force_sh_3d", action="store_true", default=True)
-    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
+    parser.add_argument("--start_checkpoint", type=str, default = None) # 修改了默认值，更规范
     
     args = parser.parse_args()
     cfg = OmegaConf.load(args.config)

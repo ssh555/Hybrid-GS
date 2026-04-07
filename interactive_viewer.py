@@ -1,3 +1,4 @@
+# interactive_viewer.py
 import time
 import math
 import torch
@@ -16,20 +17,17 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProject
 
 class RenderCam:
     def __init__(self, base_cam):
-        # 1. 拷贝渲染器 (render) 强制需要的核心标量
         self.image_width = base_cam.image_width
         self.image_height = base_cam.image_height
         self.FoVx = base_cam.FoVx
         self.FoVy = base_cam.FoVy
         self.timestamp = base_cam.timestamp
         
-        # 2. 核心防御：使用 .clone() 彻底拷贝张量数据，断开与 base_cam 的显存引用
         self.world_view_transform = base_cam.world_view_transform.clone()
         self.projection_matrix = base_cam.projection_matrix.clone()
         self.full_proj_transform = base_cam.full_proj_transform.clone()
         self.camera_center = base_cam.camera_center.clone()
         
-        # 3. 拷贝其他杂项以防万一
         self.uid = getattr(base_cam, 'uid', 0)
         self.image_name = getattr(base_cam, 'image_name', 'roam_cam')
         self.gt_alpha_mask = getattr(base_cam, 'gt_alpha_mask', None)
@@ -40,11 +38,6 @@ class RenderCam:
         self.fl_y = self.cy / math.tan(self.FoVy / 2.0)
         
     def get_rays(self):
-        """
-        原生重写射线生成逻辑，使用当前 RenderCam 自身的物理属性，
-        彻底杜绝 __getattr__ 带来的隐式上下文穿透！
-        """
-        # 使用纯 PyTorch 生成网格，避免依赖 Kornia
         y, x = torch.meshgrid(torch.arange(self.image_height), torch.arange(self.image_width), indexing='ij')
         x = (x.float() + 0.5).cuda()
         y = (y.float() + 0.5).cuda()
@@ -112,11 +105,23 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     max_cams = len(view_cams)
     print(f"[渲染器] 数据集解析完成，共 {max_cams} 个视角，每个视角 {max_frames} 帧。")
 
-    model_params, _ = torch.load(args.start_checkpoint, weights_only=False)
-    gaussians.restore(model_params, None)
+    # ==========================================
+    # 核心修改 1：支持超级大模型的读取
+    # ==========================================
+    print(f"[渲染器] 正在读取模型权重: {args.start_checkpoint}")
+    checkpoint_data, _ = torch.load(args.start_checkpoint, weights_only=False)
+    is_swings = isinstance(checkpoint_data, dict) and checkpoint_data.get("is_swings_sequence", False)
+    
+    if is_swings:
+        print("[渲染器] 🚀 检测到 SWinGS 长序列超级大模型！将根据时间轴动态加载基底！")
+        window_blocks = checkpoint_data["window_blocks"]
+        models_dict = checkpoint_data["models"]
+        current_loaded_win_idx = -1
+    else:
+        print("[渲染器] 📌 检测到传统单体模型，正在直接恢复权重...")
+        gaussians.restore(checkpoint_data, None)
 
     server = viser.ViserServer(port=8080)
-
 
     # ==========================================
     # 🎬 UI 控制台
@@ -164,14 +169,31 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
             slider_frame.value %= max_frames
 
         frame_idx = int(slider_frame.value)
+        
+        # ==========================================
+        # 核心修改 2：帧级动态参数切换逻辑
+        # ==========================================
+        if is_swings:
+            target_win_idx = 0
+            for w_idx, (w_start, w_end) in enumerate(window_blocks):
+                if w_start <= frame_idx <= w_end:
+                    target_win_idx = w_idx
+                    break
+                    
+            if target_win_idx != current_loaded_win_idx:
+                gaussians.restore(models_dict[target_win_idx], None)
+                current_loaded_win_idx = target_win_idx
+                if hasattr(gaussians, '_start_frame'):
+                    gaussians._start_frame[:] = window_blocks[target_win_idx][0]
+                    gaussians._expire_frame[:] = window_blocks[target_win_idx][1]
+
         selected_cam = view_cams[max_cams // 2][frame_idx % len(view_cams[max_cams // 2])]
 
         for client in server.get_clients().values():
             scale = gui_res_scale.value
             browser_aspect = client.camera.aspect
-            # ==========================================================
+            
             # 🕹️ 自由漫游模式：暴力覆写所有渲染矩阵！
-            # ==========================================================
             cam_state = client.camera
             
             render_w = int(selected_cam.image_width * scale)
@@ -238,7 +260,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
 
     parser.add_argument("--config", required=True)
-    parser.add_argument("--start_checkpoint", type=str, default = "无效参数，但是删除会影响其他地方的参数解析，暂时保留")
+    parser.add_argument("--start_checkpoint", type=str, default = None)
 
     parser.add_argument("--gaussian_dim", type=int, default=4)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5,0.5])
