@@ -36,6 +36,8 @@ class Trainer4DGS(BaseTrainer):
             time_duration=args.time_duration
         )
         self.gaussians.training_setup(opt)
+        self.gaussians.bind_current_window(0, self.dataset.total_frames - 1)
+
         if self.debug_params.del_ply_on_start:
             # 删除self.args.model_path路径下的chkpnt_*.pth和point_cloud_*.ply文件，避免与当前训练产生混淆
             for filename in os.listdir(self.args.model_path):
@@ -66,6 +68,7 @@ class Trainer4DGS(BaseTrainer):
             self.env_map = None
             self.env_map_optimizer = None
         self.gaussians.env_map = self.env_map
+
 
     @torch.no_grad()
     def evaluate(self, iteration):
