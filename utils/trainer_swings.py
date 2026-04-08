@@ -401,6 +401,9 @@ class TrainerSWinGS(Trainer4DGS):
         for win_idx, (start, end) in enumerate(self.window_blocks):
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
             # if os.path.exists(_path):
+            #     # _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+            #     # prev_model_data = torch.load(_path, weights_only=False)
+            #     # self.gaussians.restore(prev_model_data, self.opt)
             #     continue  # 跳过已完成的窗口
             torch.cuda.empty_cache()
             gc.collect()
@@ -438,13 +441,31 @@ class TrainerSWinGS(Trainer4DGS):
                 with torch.no_grad():
                     # 1. 静态背景点 (_mask_dynamic == 1) 拥有免死金牌，永远保留。
                     # 2. 动态点必须满足不透明度 > 0.01 才允许进入下一个窗口。
-                    keep_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & (self.gaussians.get_opacity > 0.01)) | (self.gaussians._expire_frame >= next_start)
+                    dynamic = self.gaussians._mask_dynamic.view(-1)
+                    opacity = self.gaussians.get_opacity.view(-1)
+                    expire = self.gaussians._expire_frame.view(-1)
 
+                    static_keep = (dynamic == 1)
+
+                    dynamic_keep = (
+                        (dynamic != 1)
+                        & (expire >= next_start)
+                        & (opacity > 0.01)
+                    )
+
+                    keep_mask = static_keep | dynamic_keep
+
+                    prune_mask = ~keep_mask
+                    print(
+                        f"[Window {win_idx}] total={keep_mask.numel()} "
+                        f"keep={keep_mask.sum().item()} "
+                        f"prune={prune_mask.sum().item()}"
+                    )
                     # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
                     # 用于在底层张量和优化器中剔除 keep_mask == False 的点
-                    if (~keep_mask).any():
-                        self.gaussians.prune_points(~keep_mask)
-                        print(f"🧹 窗口 {win_idx} 结束，清理了 {(~keep_mask).sum().item()} 个过期动态点！")
+                    if prune_mask.any():
+                        self.gaussians.prune_points(prune_mask)
+                        print(f"🧹 窗口 {win_idx} 结束，清理了 {prune_mask.sum().item()} 个过期动态点！")
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
 
         # ==========================================

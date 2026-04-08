@@ -66,8 +66,8 @@ OptimizationParams:
   # ==========================================================
   swin_size: 102             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
   lambda_time: 0.00005       # SWinGS: 时间一致性正则化惩罚系数
-  tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
-  tau_max: 0.005            # HybridGS 硬约束：最大瞬时位移阈值
+  tau_avg: 0.005             # HybridGS 硬约束：平均位移阈值
+  tau_max: 0.01            # HybridGS 硬约束：最大瞬时位移阈值
   freeze_start: 2650       # HybridGS 硬约束：冻结静态背景开始迭代次数
   freeze_end: 6650         # HybridGS 硬约束：冻结静态背景结束迭代次数
   freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
