@@ -190,7 +190,7 @@ class TrainerSWinGS(Trainer4DGS):
             if is_warmup and hasattr(self.gaussians, 'set_mlp_requires_grad'):
                 self.gaussians.set_mlp_requires_grad(False)
             elif iteration == warmup_iters + 1 and hasattr(self.gaussians, 'set_mlp_requires_grad'):
-                print("\n🔥 Warm-up 结束，解冻 MLP 变形网络！")
+                # print("\n🔥 Warm-up 结束，解冻 MLP 变形网络！")
                 self.gaussians.set_mlp_requires_grad(True)
 
             self.gaussians.update_learning_rate(iteration)

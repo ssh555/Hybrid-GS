@@ -1,5 +1,5 @@
 gaussian_dim: 4
-time_duration: [0.0, 7]
+time_duration: [0.0, 100]
 num_pts: 20_0000
 num_pts_ratio: 1.0
 rot_4d: True

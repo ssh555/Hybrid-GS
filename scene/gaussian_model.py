@@ -128,8 +128,8 @@ class GaussianModel:
         self._accumulated_displacement = torch.empty(0)
         self._max_instantaneous_displacement = torch.empty(0)
 
-        self.current_window_start = 0
-        self.current_window_end = 0
+        self.current_window_start = -1
+        self.current_window_end = -1
 
         self.setup_functions()
 
@@ -725,9 +725,12 @@ class GaussianModel:
                 default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda")
             else:
                 inherited = self._mask_dynamic[source_mask]
-
-                repeat_factor = num_new_pts // inherited.shape[0]
-                default_mask = inherited.repeat(repeat_factor)
+                if inherited.numel() == 0:
+                    default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda")
+                else:
+                    repeat_factor = num_new_pts // inherited.shape[0]
+                    default_mask = inherited.repeat(repeat_factor)
+                # default_mask = self._mask_dynamic[source_mask]
 
             self._start_frame = torch.cat([self._start_frame, default_start], dim=0)
             self._expire_frame = torch.cat([self._expire_frame, default_expire], dim=0)
