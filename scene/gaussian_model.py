@@ -128,6 +128,9 @@ class GaussianModel:
         self._accumulated_displacement = torch.empty(0)
         self._max_instantaneous_displacement = torch.empty(0)
 
+        self.current_window_start = 0
+        self.current_window_end = 0
+
         self.setup_functions()
 
     def capture(self):
@@ -174,9 +177,8 @@ class GaussianModel:
                 self.static_rotation,
                 self.static_opacity,
                 self.static_max_radii2D,
-                self.static_xyz_gradient_accum,
                 self.static_denom,
-
+                self.static_xyz_gradient_accum,
                 # [新增：HybridGS 专属保存]
                 getattr(self, '_start_frame', torch.empty(0)),
                 getattr(self, '_expire_frame', torch.empty(0)),
@@ -443,6 +445,16 @@ class GaussianModel:
             if self.rot_4d:
                 self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
 
+        num_pts = self._xyz.shape[0]
+        self._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+        self._expire_frame = torch.full(
+            (num_pts,),
+            self.current_window_end,
+            dtype=torch.int32,
+            device="cuda"
+        )
+        self._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
+
 
     def create_from_pth(self, path, spatial_lr_scale):
         assert self.gaussian_dim == 4 and self.rot_4d
@@ -654,7 +666,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r, source_mask=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -691,14 +703,29 @@ class GaussianModel:
         # ==============================================================================
         if hasattr(self, '_start_frame') and self._start_frame.numel() > 0:
             num_new_pts = new_xyz.shape[0]
-            
-            # 策略：新分裂/克隆出的点，生命周期继承当前的滑动窗口末尾（或者给一个默认值）
-            # 由于在底层模型中无法直接获取 trainer 的 window_end，这里赋予最安全的动态默认值
-            # 存活时间设为当前已有点的最大生命周期值，或者依靠后续滑动窗口的 alive_idx 更新来接管
-            default_start = torch.zeros(num_new_pts, dtype=torch.int32, device="cuda")
-            default_expire = torch.full((num_new_pts,), torch.max(self._expire_frame).item(), dtype=torch.int32, device="cuda")
-            default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda") # 默认为未分类的动态点
-            
+
+            win_start = getattr(self, "current_window_start", 0)
+            win_end = getattr(self, "current_window_end", 0)
+
+            default_start = torch.full(
+                (num_new_pts,),
+                win_start,
+                dtype=torch.int32,
+                device="cuda"
+            )
+
+            default_expire = torch.full(
+                (num_new_pts,),
+                win_end,
+                dtype=torch.int32,
+                device="cuda"
+            )
+
+            if source_mask is None:
+                default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda")
+            else:
+                default_mask = self._mask_dynamic[source_mask]
+
             self._start_frame = torch.cat([self._start_frame, default_start], dim=0)
             self._expire_frame = torch.cat([self._expire_frame, default_expire], dim=0)
             self._mask_dynamic = torch.cat([self._mask_dynamic, default_mask], dim=0)
@@ -768,7 +795,7 @@ class GaussianModel:
             new_t = new_xyzt[...,3:4]
             new_rotation_r = self._rotation_r[selected_pts_mask].repeat(N,1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r, source_mask = selected_pts_mask.repeat(N))
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -797,7 +824,7 @@ class GaussianModel:
             if self.rot_4d:
                 new_rotation_r = self._rotation_r[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r, selected_pts_mask)
 
     def densify_and_split_static(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_static_xyz.shape[0]
@@ -946,8 +973,12 @@ class GaussianModel:
         self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
 
-        def set_mlp_requires_grad(self, requires_grad: bool):
-            """控制变形网络(MLP)的梯度开关，服务于 SWinGS 的 Warmup 阶段"""
-            if hasattr(self, 'deformation_network'):  # 把 deformation_network 换成你实际 MLP 的名字
-                for param in self.deformation_network.parameters():
-                    param.requires_grad = requires_grad
+    def set_mlp_requires_grad(self, requires_grad: bool):
+        """控制变形网络(MLP)的梯度开关，服务于 SWinGS 的 Warmup 阶段"""
+        if hasattr(self, 'deformation_network'):  # 把 deformation_network 换成你实际 MLP 的名字
+            for param in self.deformation_network.parameters():
+                param.requires_grad = requires_grad
+
+    def bind_current_window(self, start_frame, end_frame):
+        self.current_window_start = int(start_frame)
+        self.current_window_end = int(end_frame)

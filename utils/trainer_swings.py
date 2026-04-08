@@ -18,8 +18,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.swin_size = getattr(args, 'swin_size', 50)
         self.total_frames = self.dataset.total_frames
 
-        self.current_window_start = 0
-        self.current_window_end = 0
+
         self.max_window_points = getattr(args, 'max_window_points', 2_000_000)
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
@@ -176,8 +175,7 @@ class TrainerSWinGS(Trainer4DGS):
         # 框定生命周期在当前窗口
         # self.gaussians._start_frame[:] = start_frame  
         # self.gaussians._expire_frame[:] = end_frame
-        self.gaussians.current_window_start = start_frame
-        self.gaussians.current_window_end = end_frame
+        self.gaussians.bind_current_window(start_frame, end_frame)
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
@@ -549,6 +547,7 @@ class TrainerSWinGS(Trainer4DGS):
                 # # 注意这里要切回 w-1 对应的激活掩码
                 # self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
                 # self.gaussians._expire_frame[:] = self.window_blocks[win_idx-1][1]
+                self.gaussians.bind_current_window(self.window_blocks[win_idx-1][0], self.window_blocks[win_idx-1][1])
                 # 遍历 overlap 帧对应的所有摄像机视角！
                 for d_idx in self.frames_dict[overlap_frame_id]:
                     _, viewpoint_cam = self.training_dataset[d_idx]
@@ -564,7 +563,7 @@ class TrainerSWinGS(Trainer4DGS):
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
             # self.gaussians._start_frame[:] = start
             # self.gaussians._expire_frame[:] = end
-            
+            self.gaussians.bind_current_window(start, end)
             self.train_phase2_finetune(win_idx, start, end, overlap_caches)
             # 保存微调后的结果
             _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")

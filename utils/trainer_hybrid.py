@@ -75,8 +75,7 @@ class TrainerHybrid(TrainerSWinGS):
 
         # self.gaussians._start_frame[:] = start_frame  
         # self.gaussians._expire_frame[:] = end_frame
-        self.gaussians.current_window_start = start_frame
-        self.gaussians.current_window_end = end_frame
+        self.gaussians.bind_current_window(start_frame, end_frame)
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
         
