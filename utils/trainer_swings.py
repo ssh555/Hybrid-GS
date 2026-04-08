@@ -436,9 +436,10 @@ class TrainerSWinGS(Trainer4DGS):
             if win_idx < len(self.window_blocks) - 1:
                 next_start = self.window_blocks[win_idx + 1][0]
                 with torch.no_grad():
-                    # 规则：保留静态背景点 (mask_dynamic == 1) OR 寿命能活到下个窗口的动态点
-                    keep_mask = (self.gaussians._mask_dynamic == 1) | (self.gaussians._expire_frame >= next_start)
-                    
+                    # 1. 静态背景点 (_mask_dynamic == 1) 拥有免死金牌，永远保留。
+                    # 2. 动态点必须满足不透明度 > 0.01 才允许进入下一个窗口。
+                    keep_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & (self.gaussians.get_opacity > 0.01)) | (self.gaussians._expire_frame >= next_start)
+
                     # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
                     # 用于在底层张量和优化器中剔除 keep_mask == False 的点
                     if (~keep_mask).any():

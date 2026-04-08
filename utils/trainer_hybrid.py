@@ -57,6 +57,8 @@ class TrainerHybrid(TrainerSWinGS):
                 global_static_indices = torch.nonzero(dynamic_mask, as_tuple=True)[0][is_static]
                 global_static_mask[global_static_indices] = True
                 
+                self.gaussians._mask_dynamic[global_static_mask] = 1
+
                 # 【修复核心】：在物理转移之前，先为这些被选中的背景点修改寿命！
                 if hasattr(self.gaussians, '_expire_frame'):
                     self.gaussians._expire_frame[global_static_mask] = self.total_frames - 1
