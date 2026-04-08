@@ -724,7 +724,10 @@ class GaussianModel:
             if source_mask is None:
                 default_mask = torch.zeros(num_new_pts, dtype=torch.int8, device="cuda")
             else:
-                default_mask = self._mask_dynamic[source_mask]
+                inherited = self._mask_dynamic[source_mask]
+
+                repeat_factor = num_new_pts // inherited.shape[0]
+                default_mask = inherited.repeat(repeat_factor)
 
             self._start_frame = torch.cat([self._start_frame, default_start], dim=0)
             self._expire_frame = torch.cat([self._expire_frame, default_expire], dim=0)
@@ -794,8 +797,8 @@ class GaussianModel:
             new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1) / (0.8*N))
             new_t = new_xyzt[...,3:4]
             new_rotation_r = self._rotation_r[selected_pts_mask].repeat(N,1)
-
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r, source_mask = selected_pts_mask.repeat(N))
+        parent_mask = selected_pts_mask
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r, source_mask = parent_mask)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
