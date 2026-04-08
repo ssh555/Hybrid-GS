@@ -419,8 +419,8 @@ class TrainerSWinGS(Trainer4DGS):
         # ==========================================
         for win_idx, (start, end) in enumerate(self.window_blocks):
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            if os.path.exists(_path):
-                continue  # 跳过已完成的窗口
+            # if os.path.exists(_path):
+            #     continue  # 跳过已完成的窗口
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -459,8 +459,8 @@ class TrainerSWinGS(Trainer4DGS):
         # ==========================================
         for win_idx in range(1, len(self.window_blocks)):
             _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
-            if os.path.exists(_path):
-                continue  # 跳过已完成的窗口
+            # if os.path.exists(_path):
+            #     continue  # 跳过已完成的窗口
             start, end = self.window_blocks[win_idx]
             # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
             self.window_cache = {}
