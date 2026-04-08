@@ -103,23 +103,6 @@ class TrainerSWinGS(Trainer4DGS):
             final_mask = (self.gaussians._mask_dynamic == 1) | ((self.gaussians._mask_dynamic != 1) & active_mask)
             return final_mask
         return active_mask
-    # def _get_active_dynamic_mask(self, frame_id):
-    #     if (
-    #         not hasattr(self.gaussians, "_start_frame")
-    #         or self.gaussians._start_frame.numel() == 0
-    #     ):
-    #         return None
-
-    #     active_mask = (
-    #         (self.gaussians._start_frame <= frame_id)
-    #         & (self.gaussians._expire_frame >= frame_id)
-    #     )
-
-    #     if hasattr(self.gaussians, "_mask_dynamic"):
-    #         dynamic_mask = self.gaussians._mask_dynamic != 0
-    #         return dynamic_mask & active_mask
-
-    #     return active_mask
 
     @torch.no_grad()
     def evaluate(self, iteration, start_frame=0, end_frame=None, tag=""):
@@ -187,8 +170,8 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"\n🚀 开始 {self.__class__.__name__} 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
 
         # 框定生命周期在当前窗口
-        self.gaussians._start_frame[:] = start_frame  
-        self.gaussians._expire_frame[:] = end_frame
+        # self.gaussians._start_frame[:] = start_frame  
+        # self.gaussians._expire_frame[:] = end_frame
 
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
@@ -288,8 +271,9 @@ class TrainerSWinGS(Trainer4DGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.opt.densify_until_iter:
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
                     else:
@@ -298,16 +282,10 @@ class TrainerSWinGS(Trainer4DGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            active_grad_threshold = self.opt.densify_grad_threshold
-                            active_grad_t_threshold = getattr(self.opt, 'densify_grad_t_threshold', 0.00005)
-                            current_pts = self.gaussians.get_xyz.shape[0]
-                            max_points = getattr(self.opt, 'densify_until_num_points', 4000000)
-                            if max_points > 0 and current_pts >= max_points:
-                                active_grad_threshold, active_grad_t_threshold = 99999.0, 99999.0 
-                            self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, active_grad_t_threshold)
+                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
                                 
-                if iteration % self.opt.opacity_reset_interval == 0:
-                    self.gaussians.reset_opacity()
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                        self.gaussians.reset_opacity()
                         
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
@@ -331,7 +309,7 @@ class TrainerSWinGS(Trainer4DGS):
 
         progress_bar.close()
 
-    def train_phase2_finetune(self, win_idx, start_frame, end_frame, overlap_image_cache):
+    def train_phase2_finetune(self, win_idx, start_frame, end_frame, overlap_caches):
         """阶段二：时序一致性微调（使用 finetune_iterations 配置）"""
         print(f"\n🔄 {self.__class__.__name__} 阶段 2: 时序微调窗口 {win_idx} [{start_frame}-{end_frame}]")
         
@@ -354,7 +332,7 @@ class TrainerSWinGS(Trainer4DGS):
                 # 75% 概率执行时序一致性约束，25% 正常训练 (MLP已被冻结，只微调 Canonical)
                 is_consistency_step = random.random() < self.opt.replay_prob
 
-                if is_consistency_step and overlap_image_cache is not None:
+                if is_consistency_step and overlap_caches is not None and len(overlap_caches) > 0:
                     t_id = start_frame
                     dataset_idx = random.choice(self.frames_dict[t_id])
                     gt_image, viewpoint_cam = self.window_cache[dataset_idx] # 【修改】从缓存读取
@@ -363,9 +341,12 @@ class TrainerSWinGS(Trainer4DGS):
                     active_mask = self._get_active_dynamic_mask(t_id)
                     render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
                     image = render_pkg["render"]
-                    
+
+                    # ✅ 【核心修复】精准提取相同摄像机的缓存图计算 Loss！
+                    target_cache = overlap_caches[dataset_idx]
+
                     # 一致性损失 L_consistency
-                    current_loss = l1_loss(image, overlap_image_cache)
+                    current_loss = l1_loss(image, target_cache)
                     lambda_time = getattr(self.opt, 'lambda_time', 1.0)
                     current_loss = lambda_time * current_loss
                 else:
@@ -451,7 +432,18 @@ class TrainerSWinGS(Trainer4DGS):
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
             os.makedirs(os.path.dirname(_path), exist_ok=True)
             torch.save(self.gaussians.capture(), _path)
-            self._reset_gaussian()
+            # self._reset_gaussian()
+            if win_idx < len(self.window_blocks) - 1:
+                next_start = self.window_blocks[win_idx + 1][0]
+                with torch.no_grad():
+                    # 规则：保留静态背景点 (mask_dynamic == 1) OR 寿命能活到下个窗口的动态点
+                    keep_mask = (self.gaussians._mask_dynamic == 1) | (self.gaussians._expire_frame >= next_start)
+                    
+                    # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
+                    # 用于在底层张量和优化器中剔除 keep_mask == False 的点
+                    if (~keep_mask).any():
+                        self.gaussians.prune_points(~keep_mask)
+                        print(f"🧹 窗口 {win_idx} 结束，清理了 {(~keep_mask).sum().item()} 个过期动态点！")
             self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
 
         # ==========================================
@@ -471,6 +463,7 @@ class TrainerSWinGS(Trainer4DGS):
                             self.window_cache[d_idx] = self.training_dataset[d_idx]
             # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
             overlap_frame_id = start
+            overlap_caches = {} # 改为字典
             dataset_idx = random.choice(self.frames_dict[overlap_frame_id])
             _, viewpoint_cam = self.training_dataset[dataset_idx]
             viewpoint_cam = viewpoint_cam.cuda()
@@ -480,22 +473,26 @@ class TrainerSWinGS(Trainer4DGS):
                 _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth")
                 prev_model_data = torch.load(_path, weights_only=False)
                 self.gaussians.restore(prev_model_data, self.opt)
-                # 注意这里要切回 w-1 对应的激活掩码
-                self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
-                self.gaussians._expire_frame[:] = self.window_blocks[win_idx-1][1]
-                active_mask = self._get_active_dynamic_mask(overlap_frame_id)
-                render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
-                overlap_image_cache = render_pkg["render"].detach().clone()
+                # # 注意这里要切回 w-1 对应的激活掩码
+                # self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
+                # self.gaussians._expire_frame[:] = self.window_blocks[win_idx-1][1]
+                # 遍历 overlap 帧对应的所有摄像机视角！
+                for d_idx in self.frames_dict[overlap_frame_id]:
+                    _, viewpoint_cam = self.training_dataset[d_idx]
+                    viewpoint_cam = viewpoint_cam.cuda()
+                    active_mask = self._get_active_dynamic_mask(overlap_frame_id)
+                    render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
+                    overlap_caches[d_idx] = render_pkg["render"].detach().clone()
 
             # 2. 载入当前窗口 (w) 模型准备微调
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
             curr_model_data = torch.load(_path, weights_only=False)
             self.gaussians.restore(curr_model_data, self.opt)
             # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
-            self.gaussians._start_frame[:] = start
-            self.gaussians._expire_frame[:] = end
+            # self.gaussians._start_frame[:] = start
+            # self.gaussians._expire_frame[:] = end
             
-            self.train_phase2_finetune(win_idx, start, end, overlap_image_cache)
+            self.train_phase2_finetune(win_idx, start, end, overlap_caches)
             # 保存微调后的结果
             _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
             os.makedirs(os.path.dirname(_path), exist_ok=True)

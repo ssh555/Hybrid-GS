@@ -70,8 +70,8 @@ class TrainerHybrid(TrainerSWinGS):
         """重写第一阶段：融入 Hybrid 软硬约束，并完美保留绘图与 YAML 配置"""
         print(f"\n🚀 开始 HybridGS 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
 
-        self.gaussians._start_frame[:] = start_frame  
-        self.gaussians._expire_frame[:] = end_frame
+        # self.gaussians._start_frame[:] = start_frame  
+        # self.gaussians._expire_frame[:] = end_frame
 
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
@@ -192,32 +192,31 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.opt.densify_until_iter:
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    if static:
+                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
+                    
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
                     else:
                         self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                        if static:
+                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
 
-                    if iteration > self.opt.densify_from_iter and iteration % self.opt.densification_interval == 0: 
+                    if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
-                        active_grad_threshold = self.opt.densify_grad_threshold
-                        
-                        try: num_static = self.gaussians.get_static_xyz.shape[0] if (hasattr(self.gaussians, 'get_static_xyz') and self.gaussians.get_static_xyz is not None) else 0
-                        except: num_static = 0
-                        
-                        if (self.gaussians.get_xyz.shape[0] + num_static) >= getattr(self.opt, 'densify_until_num_points', 4000000):
-                            active_grad_threshold = 99999.0 
-                            
-                        self.gaussians.densify_and_prune(active_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold)
+                        if iteration % self.opt.densification_interval == 0: 
+                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
                                 
-                if iteration % self.opt.opacity_reset_interval == 0:
-                    self.gaussians.reset_opacity()
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                        self.gaussians.reset_opacity()
 
                 # --- 硬约束判定 ---
                 freeze_start_iter = self.opt.freeze_start
                 freeze_end_iter = self.opt.freeze_end
-                if self.use_hard and iteration >= freeze_start_iter and iteration <= freeze_end_iter and (iteration - freeze_start_iter) % self.opt.freeze_internal == 0:
+                # ✅ 限制：只有在早期窗口（如 win_idx <= 2）才允许执行背景冻结
+                if self.use_hard and win_idx <= 2 and iteration >= freeze_start_iter and iteration <= freeze_end_iter and (iteration - freeze_start_iter) % self.opt.freeze_internal == 0:
                     self.robust_hard_constraint_classifier(start_frame, end_frame)
                 # 防止静态点更新
                 static_mask = (self.gaussians._mask_dynamic == 1)
