@@ -61,6 +61,7 @@ class TrainerHybrid(TrainerSWinGS):
 
                 # 【修复核心】：在物理转移之前，先为这些被选中的背景点修改寿命！
                 if hasattr(self.gaussians, '_expire_frame'):
+                    self.gaussians._start_frame[global_static_mask] = 0
                     self.gaussians._expire_frame[global_static_mask] = self.total_frames - 1
 
                 if hasattr(self.gaussians, 'kinematic_dynamic2static'):
@@ -74,7 +75,8 @@ class TrainerHybrid(TrainerSWinGS):
 
         # self.gaussians._start_frame[:] = start_frame  
         # self.gaussians._expire_frame[:] = end_frame
-
+        self.gaussians.current_window_start = start_frame
+        self.gaussians.current_window_end = end_frame
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
         

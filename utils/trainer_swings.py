@@ -17,6 +17,10 @@ class TrainerSWinGS(Trainer4DGS):
         
         self.swin_size = getattr(args, 'swin_size', 50)
         self.total_frames = self.dataset.total_frames
+
+        self.current_window_start = 0
+        self.current_window_end = 0
+        self.max_window_points = getattr(args, 'max_window_points', 2_000_000)
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
         self.window_blocks = []
@@ -172,7 +176,8 @@ class TrainerSWinGS(Trainer4DGS):
         # 框定生命周期在当前窗口
         # self.gaussians._start_frame[:] = start_frame  
         # self.gaussians._expire_frame[:] = end_frame
-
+        self.gaussians.current_window_start = start_frame
+        self.gaussians.current_window_end = end_frame
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.opt.iterations
         warmup_iters = self.opt.warmup_iterations
@@ -422,13 +427,38 @@ class TrainerSWinGS(Trainer4DGS):
                 self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
             # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
             with torch.no_grad():
+                self.current_window_start = start
+                self.current_window_end = end
+
+                num_pts = self.gaussians.get_xyz.shape[0]
+
                 if win_idx == 0:
-                    self.gaussians._start_frame[:] = start
-                    self.gaussians._expire_frame[:] = end
+                    # 首窗口初始化生命周期
+                    self.gaussians._start_frame = torch.full(
+                        (num_pts,), start, dtype=torch.int32, device="cuda"
+                    )
+                    self.gaussians._expire_frame = torch.full(
+                        (num_pts,), end, dtype=torch.int32, device="cuda"
+                    )
                 else:
-                    # 把依然存活的点的寿命延长到本窗口末尾
-                    alive_mask = (self.gaussians._start_frame <= start) & (self.gaussians._expire_frame >= start)
-                    self.gaussians._expire_frame[alive_mask] = end
+                    # 只允许 overlap 帧仍存活的动态点进入新窗口
+                    overlap_frame = start
+
+                    static_mask = (self.gaussians._mask_dynamic == 1)
+                    dynamic_alive = (
+                        (self.gaussians._mask_dynamic != 1)
+                        & (self.gaussians._start_frame <= overlap_frame)
+                        & (self.gaussians._expire_frame >= overlap_frame)
+                    )
+
+                    inherit_mask = static_mask | dynamic_alive
+
+                    # 只给真正继承下来的动态点续命
+                    self.gaussians._expire_frame[dynamic_alive] = end
+
+                    # 不继承的动态点直接标记死亡，等待窗口后 prune
+                    dead_mask = (~inherit_mask) & (self.gaussians._mask_dynamic != 1)
+                    self.gaussians._expire_frame[dead_mask] = overlap_frame - 1
             self.train_phase1_window(win_idx, start, end)
             
             # 必须在第一阶段结束时持久化局部窗口模型
@@ -454,7 +484,28 @@ class TrainerSWinGS(Trainer4DGS):
                     )
 
                     keep_mask = static_keep | dynamic_keep
+                    # =========================
+                    # 二级限制：最多 200w
+                    # =========================
+                    max_pts = self.max_window_points
+                    keep_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
 
+                    if keep_indices.numel() > max_pts:
+                        static_indices = torch.nonzero(static_keep, as_tuple=True)[0]
+                        dyn_indices = torch.nonzero(dynamic_keep, as_tuple=True)[0]
+
+                        remain = max_pts - static_indices.numel()
+                        remain = max(remain, 0)
+
+                        if dyn_indices.numel() > remain:
+                            dyn_opacity = opacity[dyn_indices]
+                            topk = torch.topk(dyn_opacity, remain, sorted=False).indices
+                            dyn_indices = dyn_indices[topk]
+
+                        final_keep = torch.zeros_like(keep_mask)
+                        final_keep[static_indices] = True
+                        final_keep[dyn_indices] = True
+                        keep_mask = final_keep
                     prune_mask = ~keep_mask
                     print(
                         f"[Window {win_idx}] total={keep_mask.numel()} "
