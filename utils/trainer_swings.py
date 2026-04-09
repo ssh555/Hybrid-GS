@@ -183,21 +183,12 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians.bind_current_window(start_frame, end_frame)
         # 使用 YAML 配置作为单窗口的迭代总数
         total_iters = self.iterations
-        warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1")
         
         for iteration in range(1, total_iters + 1):
             self.global_iter += 1
             
-            # [核心] SWinGS Warm-up
-            is_warmup = iteration <= warmup_iters
-            if is_warmup and hasattr(self.gaussians, 'set_mlp_requires_grad'):
-                self.gaussians.set_mlp_requires_grad(False)
-            elif iteration == warmup_iters + 1 and hasattr(self.gaussians, 'set_mlp_requires_grad'):
-                # print("\n🔥 Warm-up 结束，解冻 MLP 变形网络！")
-                self.gaussians.set_mlp_requires_grad(True)
-
             self.gaussians.update_learning_rate(iteration)
             if iteration % self.opt.sh_increase_interval == 0:
                 self.gaussians.oneupSHdegree()
@@ -229,7 +220,7 @@ class TrainerSWinGS(Trainer4DGS):
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
 
                 # 保留你原代码的 Motion & Rigid Loss (仅解冻后生效)
-                if not is_warmup and ((self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)):
+                if ((self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)):
                     current_t = t_id / self.total_frames
                     _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_mask)
                     

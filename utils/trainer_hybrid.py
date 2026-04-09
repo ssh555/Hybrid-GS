@@ -77,19 +77,12 @@ class TrainerHybrid(TrainerSWinGS):
         # self.gaussians._expire_frame[:] = end_frame
         self.gaussians.bind_current_window(start_frame, end_frame)
         total_iters = self.iterations
-        warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1 (Hybrid)")
         
         for iteration in range(1, total_iters + 1):
             self.global_iter += 1
             
-            is_warmup = iteration <= warmup_iters
-            if is_warmup and hasattr(self.gaussians, 'set_mlp_requires_grad'):
-                self.gaussians.set_mlp_requires_grad(False)
-            elif iteration == warmup_iters + 1 and hasattr(self.gaussians, 'set_mlp_requires_grad'):
-                self.gaussians.set_mlp_requires_grad(True)
-
             self.gaussians.update_learning_rate(iteration)
             if iteration % self.opt.sh_increase_interval == 0: self.gaussians.oneupSHdegree()
 
@@ -120,7 +113,7 @@ class TrainerHybrid(TrainerSWinGS):
 
                 # --- 软约束 (解冻后生效) ---
                 total_reg_loss = 0.0  
-                if self.use_soft and not is_warmup:
+                if self.use_soft:
                     warmup_start = int(total_iters * self.opt.warmup_start) 
                     warmup_end = int(total_iters * self.opt.warmup_end)
                     if iteration < warmup_start: current_lambda_d = 0.0
