@@ -24,6 +24,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.densify_until_iter = self.opt.densify_until_iter
         self.densify_grad_threshold = self.opt.densify_grad_threshold
         self.iterations = self.opt.iterations
+        self.enable_split = True
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
         self.window_blocks = []
@@ -289,7 +290,7 @@ class TrainerSWinGS(Trainer4DGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            self.gaussians.densify_and_prune(self.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = win_idx <= self.opt.freeze_end_idx)
+                            self.gaussians.densify_and_prune(self.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = self.enable_split)
                                 
                     if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
                         self.gaussians.reset_opacity()
@@ -417,6 +418,7 @@ class TrainerSWinGS(Trainer4DGS):
                 self.densify_until_iter = self.opy.densify_until_iter_after_freeze
                 self.densify_grad_threshold = self.opy.densify_grad_threshold_after_freeze
                 self.iterations = self.opt.iterations_after_freeze
+                self.enable_split = self.opt.enable_split_after_freeze
             torch.cuda.empty_cache()
             gc.collect()
 
