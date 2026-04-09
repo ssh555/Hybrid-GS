@@ -76,7 +76,7 @@ class TrainerHybrid(TrainerSWinGS):
         # self.gaussians._start_frame[:] = start_frame  
         # self.gaussians._expire_frame[:] = end_frame
         self.gaussians.bind_current_window(start_frame, end_frame)
-        total_iters = self.opt.iterations
+        total_iters = self.iterations
         warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1 (Hybrid)")
@@ -241,7 +241,7 @@ class TrainerHybrid(TrainerSWinGS):
                 self.pts_4d_history.append(self.gaussians.get_xyz.shape[0])
                 self.pts_3d_history.append(num_3d)
 
-            if iteration == self.opt.iterations:
+            if iteration == self.iterations:
                 self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase1_Win{win_idx}")
                 os.makedirs(self.args.model_path, exist_ok=True)
                 try: num_3d = self.gaussians.get_static_xyz.shape[0] if hasattr(self.gaussians, 'get_static_xyz') else 0

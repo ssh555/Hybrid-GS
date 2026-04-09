@@ -415,8 +415,8 @@ class TrainerSWinGS(Trainer4DGS):
             #     continue  # 跳过已完成的窗口
 
             if win_idx > self.opt.freeze_end_idx:
-                self.densify_until_iter = self.opy.densify_until_iter_after_freeze
-                self.densify_grad_threshold = self.opy.densify_grad_threshold_after_freeze
+                self.densify_until_iter = self.opt.densify_until_iter_after_freeze
+                self.densify_grad_threshold = self.opt.densify_grad_threshold_after_freeze
                 self.iterations = self.opt.iterations_after_freeze
                 self.enable_split = self.opt.enable_split_after_freeze
             torch.cuda.empty_cache()

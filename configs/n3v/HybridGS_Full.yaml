@@ -86,6 +86,7 @@ OptimizationParams:
   densify_grad_threshold_after_freeze: 0.0001  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
   iterations_after_freeze: 6000  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
   enable_split_after_freeze: False  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
+  freeze_end_idx: 2         # 结束窗口号,包含该窗口,从0开始计数
 
 DebugParmas:
   save_ply_interval: -1
