@@ -119,7 +119,7 @@ class TrainerSWinGS(Trainer4DGS):
         test_cameras = self.scene.getTestCameras()
         if not test_cameras: return
             
-        total_psnr, total_ssim, total_lpips, total_fps = 0.0, 0.0, 0.0
+        total_psnr, total_ssim, total_lpips, total_fps = 0.0, 0.0, 0.0, 0.0
         valid_frames_count = 0  # 记录当前窗口内有效测试帧的数量
         
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
