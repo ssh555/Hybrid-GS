@@ -100,6 +100,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.global_iter = 0  # 全局迭代步数，用于贯穿所有窗口
         self.eval_psnr_sum = 0.0
         self.eval_ssim_sum = 0.0
+        self.eval_lpips_sum = 0.0
         self.eval_fps_sum = 0.0
         self.eval_frame_count = 0
 
@@ -155,6 +156,8 @@ class TrainerSWinGS(Trainer4DGS):
             if gt_image is not None:
                 total_psnr += psnr(image, gt_image).mean().item()
                 total_ssim += ssim(image, gt_image).mean().item()
+                lpips_val = self.metrics_tracker.lpips_metric(image, gt_image).item()
+                total_lpips += lpips_val
                 valid_frames_count += 1
             total_fps += fps
             
@@ -165,13 +168,15 @@ class TrainerSWinGS(Trainer4DGS):
         avg_psnr = total_psnr / valid_frames_count
         avg_ssim = total_ssim / valid_frames_count
         avg_fps = total_fps / valid_frames_count
+        avg_lpips = total_lpips / valid_frames_count
         
-        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
+        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_lpips, avg_fps)
         self.eval_psnr_sum += total_psnr
         self.eval_ssim_sum += total_ssim
         self.eval_fps_sum += total_fps
+        self.eval_lpips_sum += total_lpips
         self.eval_frame_count += valid_frames_count
-        print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+        print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f} | FPS: {avg_fps:.2f}")
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
         """阶段一：独立训练当前窗口（使用 YAML 中的 self.iterations）"""
@@ -583,9 +588,10 @@ class TrainerSWinGS(Trainer4DGS):
         # self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
         avg_psnr = self.eval_psnr_sum / max(self.eval_frame_count, 1)
         avg_ssim = self.eval_ssim_sum / max(self.eval_frame_count, 1)
+        avg_lpips = self.eval_lpips_sum / max(self.eval_frame_count, 1)
         avg_fps = self.eval_fps_sum / max(self.eval_frame_count, 1)
-        self.metrics_tracker.record_eval_metrics(self.global_iter, avg_psnr, avg_ssim, avg_fps)
-        print(f"[INFO] [最终评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
+        self.metrics_tracker.record_eval_metrics(self.global_iter, avg_psnr, avg_ssim, avg_lpips, avg_fps)
+        print(f"[INFO] [最终评估结果] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f} | FPS: {avg_fps:.2f}")
         
         print(f"\n🎉 {self.__class__.__name__} 两阶段严格训练完成！正在生成图表...")
         

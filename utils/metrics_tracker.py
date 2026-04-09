@@ -2,6 +2,7 @@
 import torch
 import time
 import json
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 class MetricsTracker:
     _instance = None
@@ -28,6 +29,10 @@ class MetricsTracker:
                 "num_4d_gaussians": [],    # 记录活跃的动态前景高斯数量
             }
             cls._instance.start_time = None
+            cls._instance.lpips_metric = LearnedPerceptualImagePatchSimilarity(
+                net_type='alex',
+                normalize=True
+            ).cuda()
         return cls._instance
 
     def start_timer(self):
@@ -53,11 +58,11 @@ class MetricsTracker:
         vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
         self.metrics_log["vram_peak_mb"].append(vram_mb)
 
-    def record_eval_metrics(self, iteration, avg_psnr, avg_ssim, avg_fps):
-        """统一记录测试集评估指标"""
+    def record_eval_metrics(self, iteration, avg_psnr, avg_ssim, avg_lpips, avg_fps):
         self.metrics_log["test_iterations"].append(iteration)
         self.metrics_log["psnr"].append(avg_psnr)
         self.metrics_log["ssim"].append(avg_ssim)
+        self.metrics_log["lpips"].append(avg_lpips)
         self.metrics_log["fps"].append(avg_fps)
         
     def measure_fps(self, render_func, *args, **kwargs):
@@ -77,8 +82,32 @@ class MetricsTracker:
         return out, fps
         
     def calculate_image_metrics(self, gt_image, rendered_image):
-        """自动计算空间域指标：PSNR、SSIM与LPIPS"""
-        pass
+        """
+        自动计算空间域指标：PSNR、SSIM与LPIPS
+        输入:
+            gt_image: [3,H,W] or [1,3,H,W], range [0,1]
+            rendered_image: same as gt
+        返回:
+            psnr, ssim, lpips
+        """
+        from utils.image_utils import psnr
+        from utils.loss_utils import ssim
+
+        # 保证 batch 维度
+        if gt_image.dim() == 3:
+            gt_image = gt_image.unsqueeze(0)
+        if rendered_image.dim() == 3:
+            rendered_image = rendered_image.unsqueeze(0)
+
+        gt_image = gt_image.clamp(0, 1)
+        rendered_image = rendered_image.clamp(0, 1)
+
+        with torch.no_grad():
+            psnr_val = psnr(rendered_image, gt_image).mean().item()
+            ssim_val = ssim(rendered_image, gt_image).mean().item()
+            lpips_val = self.lpips_metric(rendered_image, gt_image).item()
+
+        return psnr_val, ssim_val, lpips_val
 
     def calculate_temporal_metrics(self, rendered_seq, gt_seq):
         """计算时间域指标：Temporal PSNR / Flickering Metric"""
