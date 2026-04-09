@@ -874,7 +874,7 @@ class GaussianModel:
         self.densification_postfix_static(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_t=None, prune_only=False, dynamic_only=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_t=None, prune_only=False, dynamic_only=False, enable_split=True):
         if not prune_only:
             grads = self.xyz_gradient_accum / self.denom
             grads[grads.isnan()] = 0.0
@@ -885,12 +885,14 @@ class GaussianModel:
             #     grads_t = None
 
             self.densify_and_clone(grads, max_grad, extent)
-            self.densify_and_split(grads, max_grad, extent)
+            if enable_split:
+                self.densify_and_split(grads, max_grad, extent)
             if len(self.static_xyz) != 0 and not dynamic_only:
                 static_grads = self.static_xyz_gradient_accum / self.static_denom
                 static_grads[static_grads.isnan()] = 0.0
                 self.densify_and_clone_static(static_grads, max_grad, extent)
-                self.densify_and_split_static(static_grads, max_grad, extent)
+                if enable_split:
+                    self.densify_and_split_static(static_grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if len(self.static_xyz) != 0 and not dynamic_only:

@@ -134,7 +134,14 @@ class OptimizationParams(ParamGroup):
 
         self.use_soft_constraint = True
         self.use_hard_constraint = True
-        self.replay_prob = 0.25        # SWinGS / HybridGS 经验回放概率
+        self.replay_prob = 0.75        # SWinGS / HybridGS 经验回放概率
+
+        self.densify_until_iter_after_freeze = 1200  # SWinGS / HybridGS 冻结后继续增密的迭代次数
+        self.densify_grad_threshold_after_freeze = 0.0001  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
+        self.enable_split_after_freeze = False  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
+        self.freeze_end_idx = 2         # 结束窗口号,包含该窗口,从0开始计数
+        self.iterations_after_freeze = 6000  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
+
 
         super().__init__(parser, "Optimization Parameters")
 

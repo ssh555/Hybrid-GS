@@ -195,7 +195,7 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
+                if iteration < self.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if static:
                         self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
@@ -210,7 +210,7 @@ class TrainerHybrid(TrainerSWinGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            self.gaussians.densify_and_prune(self.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = win_idx <= self.opt.freeze_end_idx)
                                 
                     if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
                         self.gaussians.reset_opacity()
@@ -219,7 +219,7 @@ class TrainerHybrid(TrainerSWinGS):
                 freeze_start_iter = self.opt.freeze_start
                 freeze_end_iter = self.opt.freeze_end
                 # ✅ 限制：只有在早期窗口（如 win_idx <= 2）才允许执行背景冻结
-                if self.use_hard and win_idx <= 2 and iteration >= freeze_start_iter and iteration <= freeze_end_iter and (iteration - freeze_start_iter) % self.opt.freeze_internal == 0:
+                if self.use_hard and win_idx <= self.opt.freeze_end_idx and iteration >= freeze_start_iter and iteration <= freeze_end_iter and (iteration - freeze_start_iter) % self.opt.freeze_internal == 0:
                     self.robust_hard_constraint_classifier(start_frame, end_frame)
                 # 防止静态点更新
                 static_mask = (self.gaussians._mask_dynamic == 1)

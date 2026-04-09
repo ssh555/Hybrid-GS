@@ -20,6 +20,10 @@ class TrainerSWinGS(Trainer4DGS):
 
 
         self.max_window_points = getattr(args, 'max_window_points', 2_000_000)
+
+        self.densify_until_iter = self.opt.densify_until_iter
+        self.densify_grad_threshold = self.opt.densify_grad_threshold
+        self.iterations = self.opt.iterations
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
         self.window_blocks = []
@@ -169,7 +173,7 @@ class TrainerSWinGS(Trainer4DGS):
         print(f"[评估结果 ({valid_frames_count} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | FPS: {avg_fps:.2f}")
 
     def train_phase1_window(self, win_idx, start_frame, end_frame):
-        """阶段一：独立训练当前窗口（使用 YAML 中的 self.opt.iterations）"""
+        """阶段一：独立训练当前窗口（使用 YAML 中的 self.iterations）"""
         print(f"\n🚀 开始 {self.__class__.__name__} 阶段 1: 独立训练窗口 {win_idx} [{start_frame}-{end_frame}]")
 
         # 框定生命周期在当前窗口
@@ -177,7 +181,7 @@ class TrainerSWinGS(Trainer4DGS):
         # self.gaussians._expire_frame[:] = end_frame
         self.gaussians.bind_current_window(start_frame, end_frame)
         # 使用 YAML 配置作为单窗口的迭代总数
-        total_iters = self.opt.iterations
+        total_iters = self.iterations
         warmup_iters = self.opt.warmup_iterations
         
         progress_bar = tqdm(range(1, total_iters + 1), desc=f"Win {win_idx} Phase 1")
@@ -274,7 +278,7 @@ class TrainerSWinGS(Trainer4DGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.opt.densify_until_num_points):
+                if iteration < self.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     
                     if batch_size == 1:
@@ -285,7 +289,7 @@ class TrainerSWinGS(Trainer4DGS):
                     if iteration > self.opt.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
-                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold)
+                            self.gaussians.densify_and_prune(self.densify_grad_threshold, self.opt.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = win_idx <= self.opt.freeze_end_idx)
                                 
                     if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
                         self.gaussians.reset_opacity()
@@ -305,7 +309,7 @@ class TrainerSWinGS(Trainer4DGS):
                     self.pts_3d_history.append(0)
 
                 # 每个窗口结束前保留测试和保存
-                if iteration == self.opt.iterations:
+                if iteration == self.iterations:
                     self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase1_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
                     self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
@@ -408,6 +412,11 @@ class TrainerSWinGS(Trainer4DGS):
             #     # prev_model_data = torch.load(_path, weights_only=False)
             #     # self.gaussians.restore(prev_model_data, self.opt)
             #     continue  # 跳过已完成的窗口
+
+            if win_idx > self.opt.freeze_end_idx:
+                self.densify_until_iter = self.opy.densify_until_iter_after_freeze
+                self.densify_grad_threshold = self.opy.densify_grad_threshold_after_freeze
+                self.iterations = self.opt.iterations_after_freeze
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -575,7 +584,6 @@ class TrainerSWinGS(Trainer4DGS):
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
-        self._save_checkpoint(str(self.opt.iterations))
         self._save_merged_checkpoint(str(self.opt.iterations))
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
