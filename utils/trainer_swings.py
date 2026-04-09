@@ -119,7 +119,7 @@ class TrainerSWinGS(Trainer4DGS):
         test_cameras = self.scene.getTestCameras()
         if not test_cameras: return
             
-        total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
+        total_psnr, total_ssim, total_lpips, total_fps = 0.0, 0.0, 0.0
         valid_frames_count = 0  # 记录当前窗口内有效测试帧的数量
         
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
@@ -154,10 +154,18 @@ class TrainerSWinGS(Trainer4DGS):
                 image = torch.clamp(render_pkg["render"], 0.0, 1.0)
             
             if gt_image is not None:
-                total_psnr += psnr(image, gt_image).mean().item()
-                total_ssim += ssim(image, gt_image).mean().item()
-                lpips_val = self.metrics_tracker.lpips_metric(image, gt_image).item()
+                psnr_val, ssim_val, lpips_val = self.metrics_tracker.calculate_image_metrics(
+                    gt_image,
+                    image
+                )
+
+                total_psnr += psnr_val
+                total_ssim += ssim_val
                 total_lpips += lpips_val
+                # total_psnr += psnr(image, gt_image).mean().item()
+                # total_ssim += ssim(image, gt_image).mean().item()
+                # lpips_val = self.metrics_tracker.lpips_metric(image, gt_image).item()
+                # total_lpips += lpips_val
                 valid_frames_count += 1
             total_fps += fps
             
