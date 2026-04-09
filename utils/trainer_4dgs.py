@@ -76,7 +76,7 @@ class Trainer4DGS(BaseTrainer):
         test_cameras = self.scene.getTestCameras()
         if not test_cameras: return
             
-        total_psnr, total_ssim, total_fps = 0.0, 0.0, 0.0
+        total_psnr, total_ssim, total_lpips, total_fps = 0.0, 0.0, 0.0, 0.0
         for idx, batch_data in enumerate(tqdm(test_cameras, desc="Testing")):
             gt_image, viewpoint_cam = batch_data
             gt_image = gt_image.cuda()
@@ -86,15 +86,24 @@ class Trainer4DGS(BaseTrainer):
             )
             image = torch.clamp(render_pkg["render"], 0.0, 1.0)
             
-            total_psnr += psnr(image, gt_image).mean().item()
-            total_ssim += ssim(image, gt_image).mean().item()
+            psnr_val, ssim_val, lpips_val = self.metrics_tracker.calculate_image_metrics(
+                gt_image,
+                image
+            )
+
+            total_psnr += psnr_val
+            total_ssim += ssim_val
+            total_lpips += lpips_val
             total_fps += fps
             
         avg_psnr = total_psnr / len(test_cameras)
         avg_ssim = total_ssim / len(test_cameras)
+        avg_lpips = total_lpips / len(test_cameras)
         avg_fps = total_fps / len(test_cameras)
         
-        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_fps)
+        self.metrics_tracker.record_eval_metrics(iteration, avg_psnr, avg_ssim, avg_lpips, avg_fps)
+        print(f"[评估结果 ({len(test_cameras)} 帧)] PSNR: {avg_psnr:.4f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f} | FPS: {avg_fps:.2f}")
+
 
     def train(self):
         print(f"\n[Trainer4DGS] 开始标准 3D4DGS 训练，总迭代次数: {self.opt.iterations}")
