@@ -51,10 +51,10 @@ OptimizationParams:
   densification_interval: 100 
   opacity_reset_interval: 3000
   densify_from_iter: 500 
-  densify_until_iter: 2700
-  densify_grad_threshold: 0.00012
+  densify_until_iter: 7000
+  densify_grad_threshold: 0.00018
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 3500000
+  densify_until_num_points: 2000000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
