@@ -52,9 +52,9 @@ OptimizationParams:
   opacity_reset_interval: 3000
   densify_from_iter: 500 
   densify_until_iter: 7000
-  densify_grad_threshold: 0.00018
+  densify_grad_threshold: 0.00016
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 2000000
+  densify_until_num_points: 2500000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
@@ -65,13 +65,13 @@ OptimizationParams:
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 102             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  lambda_time: 0.00005       # SWinGS: 时间一致性正则化惩罚系数
+  lambda_time: 0.00003       # SWinGS: 时间一致性正则化惩罚系数
   tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.005            # HybridGS 硬约束：最大瞬时位移阈值
   freeze_start: 2650       # HybridGS 硬约束：冻结静态背景开始迭代次数
   freeze_end: 6650         # HybridGS 硬约束：冻结静态背景结束迭代次数
   freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
-  lambda_d: 0.00005             # HybridGS 软约束：位移收敛正则化系数
+  lambda_d: 0.00003             # HybridGS 软约束：位移收敛正则化系数
   warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
   warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
   finetune_iterations: 2000      # SWinGS 细调阶段迭代数 (在 Warmup 之后，全面开启时间一致性正则化，进一步提升时间一致性)
@@ -83,8 +83,8 @@ OptimizationParams:
   replay_prob: 0.75        # SWinGS / HybridGS 经验回放概率
   densify_until_iter_after_freeze: 800  # SWinGS / HybridGS 冻结后继续增密的迭代次数
   densify_grad_threshold_after_freeze: 0.0012  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
-  thresh_opa_prune_after_freeze: 0.008  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
-  iterations_after_freeze: 5000  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
+  thresh_opa_prune_after_freeze: 0.006  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
+  iterations_after_freeze: 6500  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
   enable_split_after_freeze: True  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
   freeze_end_idx: 2         # 结束窗口号,包含该窗口,从0开始计数
 
