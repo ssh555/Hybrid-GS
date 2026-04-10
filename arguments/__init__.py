@@ -141,6 +141,7 @@ class OptimizationParams(ParamGroup):
         self.enable_split_after_freeze = False  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
         self.freeze_end_idx = 2         # 结束窗口号,包含该窗口,从0开始计数
         self.iterations_after_freeze = 6000  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
+        self.thresh_opa_prune_after_freeze = 0.02  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
 
 
         super().__init__(parser, "Optimization Parameters")
