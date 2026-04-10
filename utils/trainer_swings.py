@@ -17,6 +17,7 @@ class TrainerSWinGS(Trainer4DGS):
         
         self.swin_size = getattr(args, 'swin_size', 50)
         self.total_frames = self.dataset.total_frames
+        self.overlap_size = 8
 
 
         self.max_window_points = getattr(args, 'max_window_points', 2_000_000)
@@ -346,22 +347,27 @@ class TrainerSWinGS(Trainer4DGS):
                 is_consistency_step = random.random() < self.opt.replay_prob
 
                 if is_consistency_step and overlap_caches is not None and len(overlap_caches) > 0:
-                    t_id = start_frame
-                    dataset_idx = random.choice(self.frames_dict[t_id])
-                    gt_image, viewpoint_cam = self.window_cache[dataset_idx] # 【修改】从缓存读取
+                    t_id = random.choice(list(overlap_caches.keys()))
+                    dataset_idx = random.choice(list(overlap_caches[t_id].keys()))
+
+                    gt_image, viewpoint_cam = self.window_cache[dataset_idx]
                     gt_image, viewpoint_cam = gt_image.cuda(), viewpoint_cam.cuda()
-                    
+
                     active_mask = self._get_active_dynamic_mask(t_id)
-                    render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
+
+                    render_pkg = render(
+                        viewpoint_cam,
+                        self.gaussians,
+                        self.pipe,
+                        self.background,
+                        active_dynamic_mask=active_mask
+                    )
                     image = render_pkg["render"]
 
-                    # ✅ 【核心修复】精准提取相同摄像机的缓存图计算 Loss！
-                    target_cache = overlap_caches[dataset_idx]
+                    target_cache = overlap_caches[t_id][dataset_idx]
 
-                    # 一致性损失 L_consistency
                     current_loss = l1_loss(image, target_cache)
-                    lambda_time = getattr(self.opt, 'lambda_time', 1.0)
-                    current_loss = lambda_time * current_loss
+                    current_loss = self.opt.lambda_time * current_loss
                 else:
                     t_id = random.randint(start_frame, end_frame)
                     dataset_idx = random.choice(self.frames_dict[t_id])
@@ -550,28 +556,48 @@ class TrainerSWinGS(Trainer4DGS):
                         if d_idx not in self.window_cache:
                             self.window_cache[d_idx] = self.training_dataset[d_idx]
             # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
-            overlap_frame_id = start
-            overlap_caches = {} # 改为字典
-            dataset_idx = random.choice(self.frames_dict[overlap_frame_id])
-            _, viewpoint_cam = self.training_dataset[dataset_idx]
-            viewpoint_cam = viewpoint_cam.cuda()
+            overlap_size = 8
+            prev_start, prev_end = self.window_blocks[win_idx - 1]
+            # 上一窗口最后 overlap_size 帧
+            prev_overlap_frames = list(
+                range(max(prev_start, prev_end - overlap_size + 1), prev_end + 1)
+            )
+
+            # 当前窗口前 overlap_size 帧
+            curr_overlap_frames = list(
+                range(start, min(end + 1, start + overlap_size))
+            )
+            overlap_pairs = list(zip(prev_overlap_frames, curr_overlap_frames))
+            overlap_caches = {}
             
             with torch.no_grad():
-                # 正确载入前一窗口 (w-1) 提取渲染监督图像的模型参数
-                _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth")
-                prev_model_data = torch.load(_path, weights_only=False)
+                prev_model_data = torch.load(
+                    os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth"),
+                    weights_only=False
+                )
                 self.gaussians.restore(prev_model_data, self.opt)
-                # # 注意这里要切回 w-1 对应的激活掩码
-                # self.gaussians._start_frame[:] = self.window_blocks[win_idx-1][0]
-                # self.gaussians._expire_frame[:] = self.window_blocks[win_idx-1][1]
-                self.gaussians.bind_current_window(self.window_blocks[win_idx-1][0], self.window_blocks[win_idx-1][1])
-                # 遍历 overlap 帧对应的所有摄像机视角！
-                for d_idx in self.frames_dict[overlap_frame_id]:
-                    _, viewpoint_cam = self.training_dataset[d_idx]
-                    viewpoint_cam = viewpoint_cam.cuda()
-                    active_mask = self._get_active_dynamic_mask(overlap_frame_id)
-                    render_pkg = render(viewpoint_cam, self.gaussians, self.pipe, self.background, active_dynamic_mask=active_mask)
-                    overlap_caches[d_idx] = render_pkg["render"].detach().clone()
+                self.gaussians.bind_current_window(prev_start, prev_end)
+
+                for prev_fid, curr_fid in overlap_pairs:
+                    overlap_caches[curr_fid] = {}
+
+                    for d_idx in self.frames_dict[curr_fid]:
+                        _, viewpoint_cam = self.training_dataset[d_idx]
+                        viewpoint_cam = viewpoint_cam.cuda()
+
+                        active_mask = self._get_active_dynamic_mask(prev_fid)
+
+                        render_pkg = render(
+                            viewpoint_cam,
+                            self.gaussians,
+                            self.pipe,
+                            self.background,
+                            active_dynamic_mask=active_mask
+                        )
+
+                        overlap_caches[curr_fid][d_idx] = (
+                            render_pkg["render"].detach().clone()
+                        )
 
             # 2. 载入当前窗口 (w) 模型准备微调
             _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
