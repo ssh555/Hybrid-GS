@@ -1,5 +1,6 @@
 # 纯净版：自动分组单视角动态渲染 (严格空间判定版) + SWinGS 超级模型支持
 import os
+import json
 import torch
 import imageio
 import numpy as np
@@ -11,6 +12,8 @@ from omegaconf.dictconfig import DictConfig
 from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
+
+from utils.camera_utils import get_camera_metadata
 
 @torch.no_grad()
 def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
@@ -24,7 +27,6 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
                               rot_4d=args.rot_4d, force_sh_3d=args.force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0)
     
     scene = Scene(dataset, gaussians, shuffle=False)
-    train_cameras = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
 
     checkpoint = args.start_checkpoint or os.path.join(dataset.model_path, "chkpnt_6000.pth")
     print(f"[渲染器] 正在读取模型权重: {checkpoint}")
@@ -46,21 +48,13 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
     # ==========================================
     # 核心逻辑：智能分离出【同一个视角】的所有时间帧
     # ==========================================
-    print(f"[渲染器] 数据集共有 {len(train_cameras)} 个样本。正在智能聚类单视角...")
+    all_cams, max_frames, max_cams = get_camera_metadata(scene, dataset.model_path)
     
-    base_cam = train_cameras[int(len(train_cameras) / 2)]
-    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
-    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R 
+    # 选定一个基准视角进行渲染（例如正中心视角）
+    target_v_idx = max_cams // 2
+    view_0_cameras = all_cams[target_v_idx * max_frames : (target_v_idx + 1) * max_frames]
     
-    view_0_cameras = []
-    
-    for cam in train_cameras:
-        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R 
-        
-        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
-            view_0_cameras.append(cam)
-            
+    # 按时间或 fid 排序
     view_0_cameras.sort(key=lambda x: getattr(x, 'fid', getattr(x, 'timestamp', 0)))
     
     print(f"[渲染器] 成功提取到基准视角的 {len(view_0_cameras)} 帧连续画面！")

@@ -14,6 +14,7 @@ from arguments import ModelParams, PipelineParams
 from scene import Scene, GaussianModel
 from gaussian_renderer import render
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift, getProjectionMatrixCV, pix2ndc
+from utils.camera_utils import get_camera_metadata
 
 class RenderCam:
     def __init__(self, base_cam):
@@ -84,21 +85,7 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
         force_sh_3d=args.force_sh_3d
     )
     scene = Scene(dataset, gaussians, shuffle=False)
-    train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
-    
-    base_cam = train_cams[0]
-    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
-    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R
-    
-    max_frames = 0
-    for cam in train_cams:
-        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
-        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R
-        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
-            max_frames += 1
-        else:
-            break
-            
+    train_cams, max_frames, max_cams = get_camera_metadata(scene, dataset.model_path)
     view_cams = []
     for i in range(0, len(train_cams), max_frames):
         view_cams.append(train_cams[i:i+max_frames])

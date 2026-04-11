@@ -10,8 +10,8 @@ start_checkpoint: "output/swings/miku_shaungxue_daxi/full/chkpnt_10000.pth"
 
 ModelParams:
   sh_degree: 3
-  source_path: "./datasets/miku_shaungxue_daxi/full"
-  model_path: "output/swings/miku_shaungxue_daxi/full"
+  # source_path: "./datasets/miku_shaungxue_daxi/full"
+  # model_path: "output/swings/miku_shaungxue_daxi/full"
   images: "images"
   resolution: 1 
   white_background: False

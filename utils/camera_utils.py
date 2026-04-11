@@ -8,11 +8,15 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+import json
+import os
+import torch
 
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
+
 
 WARNED = False
 
@@ -111,3 +115,53 @@ def camera_to_JSON(id, camera : Camera):
         'fx' : fov2focal(camera.FovX, camera.width)
     }
     return camera_entry
+
+
+
+def get_camera_metadata(scene, dataset_path):
+    """
+    获取相机元数据。如果存在缓存则直接读取，否则进行一次性解析并保存。
+    """
+    cache_path = os.path.join(dataset_path, "camera_structure_cache.json")
+    
+    # 1. 获取原始相机列表 (这一步 scene 内部会有一次 IO，但无法完全避免)
+    train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
+    total_count = len(train_cams)
+
+    # 2. 检查缓存是否存在且有效
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r") as f:
+                meta = json.load(f)
+            if meta.get("total_count") == total_count:
+                print(f"[缓存] 成功加载相机结构: {meta['max_cams']} 视角 x {meta['max_frames']} 帧")
+                return train_cams, meta['max_frames'], meta['max_cams']
+        except Exception:
+            pass
+
+    # 3. 缓存失效或不存在，执行解析逻辑
+    print(f"[解析] 正在分析 {total_count} 个相机的时空结构，请稍候...")
+    base_cam = train_cams[0]
+    base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
+    base_R = base_cam.R.cpu().numpy() if hasattr(base_cam.R, 'cpu') else base_cam.R
+    
+    max_frames = 0
+    for cam in train_cams:
+        cam_T = cam.T.cpu().numpy() if hasattr(cam.T, 'cpu') else cam.T
+        cam_R = cam.R.cpu().numpy() if hasattr(cam.R, 'cpu') else cam.R
+        if np.allclose(base_T, cam_T, atol=1e-5) and np.allclose(base_R, cam_R, atol=1e-5):
+            max_frames += 1
+        else:
+            break
+    
+    max_cams = total_count // max_frames
+    
+    # 保存结果到 JSON
+    with open(cache_path, "w") as f:
+        json.dump({
+            "max_frames": max_frames,
+            "max_cams": max_cams,
+            "total_count": total_count
+        }, f)
+    
+    return train_cams, max_frames, max_cams
