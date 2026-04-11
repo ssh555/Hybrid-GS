@@ -27,6 +27,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.iterations = self.opt.iterations
         self.thresh_opa_prune = self.opt.thresh_opa_prune
         self.enable_split = True
+        self.densify_until_num_points = self.opt.densify_until_num_points
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
         self.window_blocks = []
@@ -285,7 +286,7 @@ class TrainerSWinGS(Trainer4DGS):
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.opt.densify_until_num_points):
+                if iteration < self.densify_until_iter and (self.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     
                     if batch_size == 1:
@@ -431,6 +432,7 @@ class TrainerSWinGS(Trainer4DGS):
                 self.iterations = self.opt.iterations_after_freeze
                 self.enable_split = self.opt.enable_split_after_freeze
                 self.thresh_opa_prune = self.opt.thresh_opa_prune_after_freeze
+                self.densify_until_num_points = self.opt.densify_until_num_points_after_freeze
             torch.cuda.empty_cache()
             gc.collect()
 

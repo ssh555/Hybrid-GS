@@ -51,10 +51,10 @@ OptimizationParams:
   densification_interval: 100 
   opacity_reset_interval: 3000
   densify_from_iter: 500 
-  densify_until_iter: 7000
-  densify_grad_threshold: 0.00016
+  densify_until_iter: 8000
+  densify_grad_threshold: 0.00014
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  densify_until_num_points: 2500000
+  densify_until_num_points: 2200000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
@@ -64,7 +64,7 @@ OptimizationParams:
   # ==========================================================
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
-  swin_size: 102             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
+  swin_size: 72             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
   lambda_time: 0.00003       # SWinGS: 时间一致性正则化惩罚系数
   tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.005            # HybridGS 硬约束：最大瞬时位移阈值
@@ -82,11 +82,12 @@ OptimizationParams:
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
   replay_prob: 0.8        # SWinGS / HybridGS 经验回放概率
   densify_until_iter_after_freeze: 800  # SWinGS / HybridGS 冻结后继续增密的迭代次数
-  densify_grad_threshold_after_freeze: 0.0012  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
+  densify_grad_threshold_after_freeze: 0.00012  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
   thresh_opa_prune_after_freeze: 0.006  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
   iterations_after_freeze: 6500  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
   enable_split_after_freeze: True  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
-  freeze_end_idx: 2         # 结束窗口号,包含该窗口,从0开始计数
+  freeze_end_idx: 1         # 结束窗口号,包含该窗口,从0开始计数
+  densify_until_num_points_after_freeze: 2800000 # 冻结后增密的最大点数 (更严格)
 
 DebugParmas:
   save_ply_interval: -1
