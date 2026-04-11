@@ -1,5 +1,6 @@
 # dataset=('miku_shaungxue_daxi_single_nowide' 'cook_spinach' 'cut_roasted_beef' 'flame_salmon' 'flame_steak' 'sear_steak')
-dataset=('miku_shaungxue_daxi_single_nowide' 'miku_shaungxue_daxi_single_wide')
+# dataset=('miku_shaungxue_daxi_single_nowide' 'miku_shaungxue_daxi_single_wide')
+dataset=('miku_shaungxue_daxi_single_nowide')
 
 config='n3v'
 device=0
