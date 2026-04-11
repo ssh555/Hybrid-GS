@@ -987,6 +987,11 @@ class GaussianModel:
             for param in self.deformation_network.parameters():
                 param.requires_grad = requires_grad
 
-    def bind_current_window(self, start_frame, end_frame):
+    def bind_current_window(self, start_frame, end_frame, fps=30.0):
         self.current_window_start = int(start_frame)
         self.current_window_end = int(end_frame)
+
+        start_t = start_frame / fps
+        end_t = end_frame / fps
+
+        self.time_duration = [float(start_t), float(end_t)]
