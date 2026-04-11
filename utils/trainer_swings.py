@@ -28,6 +28,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.thresh_opa_prune = self.opt.thresh_opa_prune
         self.enable_split = True
         self.densify_until_num_points = self.opt.densify_until_num_points
+        self.densify_from_iter = self.opt.densify_from_iter
         
         # [SWinGS 严格算法] 划分带 1 帧重叠的块状窗口 (Block Windows)
         self.window_blocks = []
@@ -294,12 +295,12 @@ class TrainerSWinGS(Trainer4DGS):
                     else:
                         self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
 
-                    if iteration > self.opt.densify_from_iter: 
+                    if iteration > self.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
                             self.gaussians.densify_and_prune(self.densify_grad_threshold, self.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = self.enable_split)
                                 
-                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
                         self.gaussians.reset_opacity()
                         
                 self.gaussians.optimizer.step()
@@ -433,6 +434,7 @@ class TrainerSWinGS(Trainer4DGS):
                 self.enable_split = self.opt.enable_split_after_freeze
                 self.thresh_opa_prune = self.opt.thresh_opa_prune_after_freeze
                 self.densify_until_num_points = self.opt.densify_until_num_points_after_freeze
+                self.densify_from_iter = self.opt.densify_from_iter_after_freeze
             torch.cuda.empty_cache()
             gc.collect()
 
