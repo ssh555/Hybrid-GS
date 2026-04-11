@@ -144,6 +144,7 @@ class OptimizationParams(ParamGroup):
         self.thresh_opa_prune_after_freeze = 0.02  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
         self.densify_until_num_points_after_freeze = 2800000 # 冻结后增密的最大点数 (更严格)
         self.densify_from_iter_after_freeze = 100  # 冻结后增密的起始迭代次数 (更早开始增密，提升细节表现)
+        self.win_end_prune_opacity_threshold = 0.012 # SWinGS 滑动窗口结束时的透明度剪枝阈值 (更严格)
 
 
         super().__init__(parser, "Optimization Parameters")

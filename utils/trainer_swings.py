@@ -505,7 +505,7 @@ class TrainerSWinGS(Trainer4DGS):
                     dynamic_keep = (
                         (dynamic != 1)
                         & (expire >= next_start)
-                        & (opacity > 0.01)
+                        & (opacity > self.opt.win_end_prune_opacity_threshold)
                     )
 
                     keep_mask = static_keep | dynamic_keep
