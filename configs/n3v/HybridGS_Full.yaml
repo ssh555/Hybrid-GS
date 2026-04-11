@@ -52,7 +52,7 @@ OptimizationParams:
   opacity_reset_interval: 3000
   densify_from_iter: 500 
   densify_until_iter: 8000
-  densify_grad_threshold: 0.00014
+  densify_grad_threshold: 0.00016
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
   densify_until_num_points: 2200000
   final_prune_from_iter: -1
@@ -74,13 +74,13 @@ OptimizationParams:
   lambda_d: 0.00003             # HybridGS 软约束：位移收敛正则化系数
   warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
   warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
-  finetune_iterations: 3000      # SWinGS 细调阶段迭代数 (在 Warmup 之后，全面开启时间一致性正则化，进一步提升时间一致性)
+  finetune_iterations: 2000      # SWinGS 细调阶段迭代数 (在 Warmup 之后，全面开启时间一致性正则化，进一步提升时间一致性)
   # ==========================================================
   # [毕设专属] 消融实验控制开关 (Ablation Switches)
   # ==========================================================
   use_soft_constraint: True   # 是否开启软约束 (运动速度惩罚)
   use_hard_constraint: True   # 是否开启硬约束 (静态背景冻结)
-  replay_prob: 0.8        # SWinGS / HybridGS 经验回放概率
+  replay_prob: 0.65        # SWinGS / HybridGS 经验回放概率
   densify_until_iter_after_freeze: 500  # SWinGS / HybridGS 冻结后继续增密的迭代次数
   densify_grad_threshold_after_freeze: 0.0002  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
   thresh_opa_prune_after_freeze: 0.006  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
@@ -89,7 +89,7 @@ OptimizationParams:
   freeze_end_idx: 1         # 结束窗口号,包含该窗口,从0开始计数
   densify_until_num_points_after_freeze: 2800000 # 冻结后增密的最大点数 (更严格)
   densify_from_iter_after_freeze: 100  # 冻结后增密的起始迭代次数 (更早开始增密，提升细节表现)
-  win_end_prune_opacity_threshold: 0.012 # SWinGS 滑动窗口结束时的透明度剪枝阈值 (更严格)
+  win_end_prune_opacity_threshold: 0.014 # SWinGS 滑动窗口结束时的透明度剪枝阈值 (更严格)
 
 DebugParmas:
   save_ply_interval: -1

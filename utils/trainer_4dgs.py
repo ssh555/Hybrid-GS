@@ -250,8 +250,8 @@ class Trainer4DGS(BaseTrainer):
                                 if hasattr(self.gaussians, 'dynamic2static'):
                                     self.gaussians.dynamic2static(self.opt.scale_t_threshold)
                                     
-                        if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
-                            self.gaussians.reset_opacity()
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                        self.gaussians.reset_opacity()
                             
                     # ================= 优化器步进 =================
                     if iteration < self.opt.iterations:
