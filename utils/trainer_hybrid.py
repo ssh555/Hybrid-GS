@@ -200,12 +200,12 @@ class TrainerHybrid(TrainerSWinGS):
                         if static:
                             self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
 
-                    if iteration > self.opt.densify_from_iter: 
+                    if iteration > self.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
                             self.gaussians.densify_and_prune(self.densify_grad_threshold, self.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = self.enable_split)
                                 
-                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
                         self.gaussians.reset_opacity()
 
                 # --- 硬约束判定 ---
