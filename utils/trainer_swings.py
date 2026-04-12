@@ -451,224 +451,230 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians.restore(model_params, self.opt)
 
     def train(self):
+        ignore_phase1 = True
+        ignore_phase2 = False
         self.metrics_tracker.start_timer()
         
         # ==========================================
         # 大循环阶段一：按顺序独立训练所有窗口
         # ==========================================
-        for win_idx, (start, end) in enumerate(self.window_blocks):
-            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            # if os.path.exists(_path):
-            #     # _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            #     # prev_model_data = torch.load(_path, weights_only=False)
-            #     # self.gaussians.restore(prev_model_data, self.opt)
-            #     continue  # 跳过已完成的窗口
+        if not ignore_phase1:
+            for win_idx, (start, end) in enumerate(self.window_blocks):
+                _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
 
-            if win_idx > self.opt.freeze_end_idx:
-                self.densify_until_iter = self.opt.densify_until_iter_after_freeze
-                self.densify_grad_threshold = self.opt.densify_grad_threshold_after_freeze
-                self.iterations = self.opt.iterations_after_freeze
-                self.enable_split = self.opt.enable_split_after_freeze
-                self.thresh_opa_prune = self.opt.thresh_opa_prune_after_freeze
-                self.densify_until_num_points = self.opt.densify_until_num_points_after_freeze
-                self.densify_from_iter = self.opt.densify_from_iter_after_freeze
-            torch.cuda.empty_cache()
-            gc.collect()
+                # if win_idx <= self.opt.freeze_end_idx:
+                #     if os.path.exists(_path):
+                #         _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+                #         prev_model_data = torch.load(_path, weights_only=False)
+                #         self.gaussians.restore(prev_model_data, self.opt)
+                #         continue  # 跳过已完成的窗口
 
-            # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
-            self.window_cache = {}
-            for frame_id in range(start, end + 1):
-                if frame_id in self.frames_dict:
-                    for d_idx in self.frames_dict[frame_id]:
-                        if d_idx not in self.window_cache:
-                            self.window_cache[d_idx] = self.training_dataset[d_idx]
-            if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
-                num_pts = self.gaussians.get_xyz.shape[0]
-                self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-                self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
-                self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
-            # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
-            with torch.no_grad():
-                self.current_window_start = start
-                self.current_window_end = end
+                if win_idx > self.opt.freeze_end_idx:
+                    self.densify_until_iter = self.opt.densify_until_iter_after_freeze
+                    self.densify_grad_threshold = self.opt.densify_grad_threshold_after_freeze
+                    self.iterations = self.opt.iterations_after_freeze
+                    self.enable_split = self.opt.enable_split_after_freeze
+                    self.thresh_opa_prune = self.opt.thresh_opa_prune_after_freeze
+                    self.densify_until_num_points = self.opt.densify_until_num_points_after_freeze
+                    self.densify_from_iter = self.opt.densify_from_iter_after_freeze
+                torch.cuda.empty_cache()
+                gc.collect()
 
-                num_pts = self.gaussians.get_xyz.shape[0]
-
-                if win_idx == 0:
-                    # 首窗口初始化生命周期
-                    self.gaussians._start_frame = torch.full(
-                        (num_pts,), start, dtype=torch.int32, device="cuda"
-                    )
-                    self.gaussians._expire_frame = torch.full(
-                        (num_pts,), end, dtype=torch.int32, device="cuda"
-                    )
-                else:
-                    # 只允许 overlap 帧仍存活的动态点进入新窗口
-                    overlap_frame = start
-
-                    static_mask = (self.gaussians._mask_dynamic == 1)
-                    dynamic_alive = (
-                        (self.gaussians._mask_dynamic != 1)
-                        & (self.gaussians._start_frame <= overlap_frame)
-                        & (self.gaussians._expire_frame >= overlap_frame)
-                    )
-
-                    inherit_mask = static_mask | dynamic_alive
-
-                    # 只给真正继承下来的动态点续命
-                    self.gaussians._expire_frame[dynamic_alive] = end
-
-                    # 不继承的动态点直接标记死亡，等待窗口后 prune
-                    dead_mask = (~inherit_mask) & (self.gaussians._mask_dynamic != 1)
-                    self.gaussians._expire_frame[dead_mask] = overlap_frame - 1
-                    # ==========================================================
-                    # 🚀 【核心修复：时间锚点强制牵引】
-                    # 解决显式4DGS继承时“时间中心滞留过去”导致的云雾与致密化爆炸
-                    # ==========================================================
-                    prev_start = self.window_blocks[win_idx-1][0]
-                    slide_frames = start - prev_start
-                    fps = 30.0  # ⚠️ 注：请确保这里使用的是你视频实际的 FPS
-                    slide_time = slide_frames / fps
-
-                    # 仅仅对【继承续命的动态点 (dynamic_alive)】进行时间轴平移！
-                    if dynamic_alive.any() and hasattr(self.gaussians, '_t'):
-                        self.gaussians._t[dynamic_alive] += slide_time
-                        print(f"⏩ 时间轴校准：已将 {dynamic_alive.sum().item()} 个存活动态高斯的 _t 强行推进了 {slide_time:.2f} 秒！")
-            self.train_phase1_window(win_idx, start, end)
-            
-            # 必须在第一阶段结束时持久化局部窗口模型
-            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            os.makedirs(os.path.dirname(_path), exist_ok=True)
-            torch.save(self.gaussians.capture(), _path)
-            # self._reset_gaussian()
-            if win_idx < len(self.window_blocks) - 1:
-                next_start = self.window_blocks[win_idx + 1][0]
+                # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
+                self.window_cache = {}
+                for frame_id in range(start, end + 1):
+                    if frame_id in self.frames_dict:
+                        for d_idx in self.frames_dict[frame_id]:
+                            if d_idx not in self.window_cache:
+                                self.window_cache[d_idx] = self.training_dataset[d_idx]
+                if not hasattr(self.gaussians, '_start_frame') or self.gaussians._start_frame.numel() == 0:
+                    num_pts = self.gaussians.get_xyz.shape[0]
+                    self.gaussians._start_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+                    self.gaussians._expire_frame = torch.zeros(num_pts, dtype=torch.int32, device="cuda")
+                    self.gaussians._mask_dynamic = torch.zeros(num_pts, dtype=torch.int8, device="cuda")
+                # 【修复1：生命周期平滑继承】防止漫游时点云断裂消失
                 with torch.no_grad():
-                    # 1. 静态背景点 (_mask_dynamic == 1) 拥有免死金牌，永远保留。
-                    # 2. 动态点必须满足不透明度 > 0.01 才允许进入下一个窗口。
-                    dynamic = self.gaussians._mask_dynamic.view(-1)
-                    opacity = self.gaussians.get_opacity.view(-1)
-                    expire = self.gaussians._expire_frame.view(-1)
+                    self.current_window_start = start
+                    self.current_window_end = end
 
-                    static_keep = (dynamic == 1)
+                    num_pts = self.gaussians.get_xyz.shape[0]
 
-                    dynamic_keep = (
-                        (dynamic != 1)
-                        & (expire >= next_start)
-                        & (opacity > 0.01)
-                    )
+                    if win_idx == 0:
+                        # 首窗口初始化生命周期
+                        self.gaussians._start_frame = torch.full(
+                            (num_pts,), start, dtype=torch.int32, device="cuda"
+                        )
+                        self.gaussians._expire_frame = torch.full(
+                            (num_pts,), end, dtype=torch.int32, device="cuda"
+                        )
+                    else:
+                        # 只允许 overlap 帧仍存活的动态点进入新窗口
+                        overlap_frame = start
 
-                    keep_mask = static_keep | dynamic_keep
-                    # =========================
-                    # 二级限制：最多 200w
-                    # =========================
-                    max_pts = self.max_window_points
-                    keep_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
+                        static_mask = (self.gaussians._mask_dynamic == 1)
+                        dynamic_alive = (
+                            (self.gaussians._mask_dynamic != 1)
+                            & (self.gaussians._start_frame <= overlap_frame)
+                            & (self.gaussians._expire_frame >= overlap_frame)
+                        )
 
-                    if keep_indices.numel() > max_pts:
-                        static_indices = torch.nonzero(static_keep, as_tuple=True)[0]
-                        dyn_indices = torch.nonzero(dynamic_keep, as_tuple=True)[0]
+                        inherit_mask = static_mask | dynamic_alive
 
-                        remain = max_pts - static_indices.numel()
-                        remain = max(remain, 0)
+                        # 只给真正继承下来的动态点续命
+                        self.gaussians._expire_frame[dynamic_alive] = end
 
-                        if dyn_indices.numel() > remain:
-                            dyn_opacity = opacity[dyn_indices]
-                            topk = torch.topk(dyn_opacity, remain, sorted=False).indices
-                            dyn_indices = dyn_indices[topk]
+                        # 不继承的动态点直接标记死亡，等待窗口后 prune
+                        dead_mask = (~inherit_mask) & (self.gaussians._mask_dynamic != 1)
+                        self.gaussians._expire_frame[dead_mask] = overlap_frame - 1
+                        # ==========================================================
+                        # 🚀 【核心修复：时间锚点强制牵引】
+                        # 解决显式4DGS继承时“时间中心滞留过去”导致的云雾与致密化爆炸
+                        # ==========================================================
+                        prev_start = self.window_blocks[win_idx-1][0]
+                        slide_frames = start - prev_start
+                        fps = 30.0  # ⚠️ 注：请确保这里使用的是你视频实际的 FPS
+                        slide_time = slide_frames / fps
 
-                        final_keep = torch.zeros_like(keep_mask)
-                        final_keep[static_indices] = True
-                        final_keep[dyn_indices] = True
-                        keep_mask = final_keep
-                    prune_mask = ~keep_mask
-                    print(
-                        f"[Window {win_idx}] total={keep_mask.numel()} "
-                        f"keep={keep_mask.sum().item()} "
-                        f"prune={prune_mask.sum().item()}"
-                    )
-                    # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
-                    # 用于在底层张量和优化器中剔除 keep_mask == False 的点
-                    if prune_mask.any():
-                        self.gaussians.prune_points(prune_mask)
-                        print(f"🧹 窗口 {win_idx} 结束，清理了 {prune_mask.sum().item()} 个过期动态点！")
-            self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
+                        # 仅仅对【继承续命的动态点 (dynamic_alive)】进行时间轴平移！
+                        if dynamic_alive.any() and hasattr(self.gaussians, '_t'):
+                            self.gaussians._t[dynamic_alive] += slide_time
+                            print(f"⏩ 时间轴校准：已将 {dynamic_alive.sum().item()} 个存活动态高斯的 _t 强行推进了 {slide_time:.2f} 秒！")
+                self.train_phase1_window(win_idx, start, end)
+                
+                # 必须在第一阶段结束时持久化局部窗口模型
+                _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+                os.makedirs(os.path.dirname(_path), exist_ok=True)
+                torch.save(self.gaussians.capture(), _path)
+                # self._reset_gaussian()
+                if win_idx < len(self.window_blocks) - 1:
+                    next_start = self.window_blocks[win_idx + 1][0]
+                    with torch.no_grad():
+                        # 1. 静态背景点 (_mask_dynamic == 1) 拥有免死金牌，永远保留。
+                        # 2. 动态点必须满足不透明度 > 0.01 才允许进入下一个窗口。
+                        dynamic = self.gaussians._mask_dynamic.view(-1)
+                        opacity = self.gaussians.get_opacity.view(-1)
+                        expire = self.gaussians._expire_frame.view(-1)
+
+                        static_keep = (dynamic == 1)
+
+                        dynamic_keep = (
+                            (dynamic != 1)
+                            & (expire >= next_start)
+                            & (opacity > 0.01)
+                        )
+
+                        keep_mask = static_keep | dynamic_keep
+                        # =========================
+                        # 二级限制：最多 200w
+                        # =========================
+                        max_pts = self.max_window_points
+                        keep_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
+
+                        if keep_indices.numel() > max_pts:
+                            static_indices = torch.nonzero(static_keep, as_tuple=True)[0]
+                            dyn_indices = torch.nonzero(dynamic_keep, as_tuple=True)[0]
+
+                            remain = max_pts - static_indices.numel()
+                            remain = max(remain, 0)
+
+                            if dyn_indices.numel() > remain:
+                                dyn_opacity = opacity[dyn_indices]
+                                topk = torch.topk(dyn_opacity, remain, sorted=False).indices
+                                dyn_indices = dyn_indices[topk]
+
+                            final_keep = torch.zeros_like(keep_mask)
+                            final_keep[static_indices] = True
+                            final_keep[dyn_indices] = True
+                            keep_mask = final_keep
+                        prune_mask = ~keep_mask
+                        print(
+                            f"[Window {win_idx}] total={keep_mask.numel()} "
+                            f"keep={keep_mask.sum().item()} "
+                            f"prune={prune_mask.sum().item()}"
+                        )
+                        # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
+                        # 用于在底层张量和优化器中剔除 keep_mask == False 的点
+                        if prune_mask.any():
+                            self.gaussians.prune_points(prune_mask)
+                            print(f"🧹 窗口 {win_idx} 结束，清理了 {prune_mask.sum().item()} 个过期动态点！")
+                self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
 
         # ==========================================
         # 大循环阶段二：时序一致性微调串联
         # ==========================================
-        for win_idx in range(1, len(self.window_blocks)):
-            _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
-            # if os.path.exists(_path):
-            #     continue  # 跳过已完成的窗口
-            start, end = self.window_blocks[win_idx]
-            # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
-            self.window_cache = {}
-            for frame_id in range(start, end + 1):
-                if frame_id in self.frames_dict:
-                    for d_idx in self.frames_dict[frame_id]:
-                        if d_idx not in self.window_cache:
-                            self.window_cache[d_idx] = self.training_dataset[d_idx]
-            # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
-            overlap_size = 8
-            prev_start, prev_end = self.window_blocks[win_idx - 1]
-            # 上一窗口最后 overlap_size 帧
-            prev_overlap_frames = list(
-                range(max(prev_start, prev_end - overlap_size + 1), prev_end + 1)
-            )
-
-            # 当前窗口前 overlap_size 帧
-            curr_overlap_frames = list(
-                range(start, min(end + 1, start + overlap_size))
-            )
-            overlap_pairs = list(zip(prev_overlap_frames, curr_overlap_frames))
-            overlap_caches = {}
-            
-            with torch.no_grad():
-                prev_model_data = torch.load(
-                    os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth"),
-                    weights_only=False
+        if not ignore_phase2:
+            for win_idx in range(1, len(self.window_blocks)):
+                _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
+                # if os.path.exists(_path):
+                #     continue  # 跳过已完成的窗口
+                start, end = self.window_blocks[win_idx]
+                # 【提前把本窗口需要的图像全部读入 CPU 内存缓存】
+                self.window_cache = {}
+                for frame_id in range(start, end + 1):
+                    if frame_id in self.frames_dict:
+                        for d_idx in self.frames_dict[frame_id]:
+                            if d_idx not in self.window_cache:
+                                self.window_cache[d_idx] = self.training_dataset[d_idx]
+                # 1. 载入前一窗口 (w-1) 模型生成基准帧缓存
+                overlap_size = 8
+                prev_start, prev_end = self.window_blocks[win_idx - 1]
+                # 上一窗口最后 overlap_size 帧
+                prev_overlap_frames = list(
+                    range(max(prev_start, prev_end - overlap_size + 1), prev_end + 1)
                 )
-                self.gaussians.restore(prev_model_data, self.opt)
-                self.gaussians.bind_current_window(prev_start, prev_end)
 
-                for prev_fid, curr_fid in overlap_pairs:
-                    overlap_caches[curr_fid] = {}
+                # 当前窗口前 overlap_size 帧
+                curr_overlap_frames = list(
+                    range(start, min(end + 1, start + overlap_size))
+                )
+                overlap_pairs = list(zip(prev_overlap_frames, curr_overlap_frames))
+                overlap_caches = {}
+                
+                with torch.no_grad():
+                    prev_model_data = torch.load(
+                        os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx - 1}.pth"),
+                        weights_only=False
+                    )
+                    self.gaussians.restore(prev_model_data, self.opt)
+                    self.gaussians.bind_current_window(prev_start, prev_end)
 
-                    for d_idx in self.frames_dict[curr_fid]:
-                        _, viewpoint_cam = self.training_dataset[d_idx]
-                        viewpoint_cam = viewpoint_cam.cuda()
+                    for prev_fid, curr_fid in overlap_pairs:
+                        overlap_caches[curr_fid] = {}
 
-                        active_mask = self._get_active_dynamic_mask(prev_fid)
+                        for d_idx in self.frames_dict[curr_fid]:
+                            _, viewpoint_cam = self.training_dataset[d_idx]
+                            viewpoint_cam = viewpoint_cam.cuda()
 
-                        render_pkg = render(
-                            viewpoint_cam,
-                            self.gaussians,
-                            self.pipe,
-                            self.background,
-                            active_dynamic_mask=active_mask
-                        )
+                            active_mask = self._get_active_dynamic_mask(prev_fid)
 
-                        overlap_caches[curr_fid][d_idx] = (
-                            render_pkg["render"].detach().clone()
-                        )
+                            render_pkg = render(
+                                viewpoint_cam,
+                                self.gaussians,
+                                self.pipe,
+                                self.background,
+                                active_dynamic_mask=active_mask
+                            )
 
-            # 2. 载入当前窗口 (w) 模型准备微调
-            _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-            curr_model_data = torch.load(_path, weights_only=False)
-            self.gaussians.restore(curr_model_data, self.opt)
-            # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
-            # self.gaussians._start_frame[:] = start
-            # self.gaussians._expire_frame[:] = end
-            self.gaussians.bind_current_window(start, end)
-            self.train_phase2_finetune(win_idx, start, end, overlap_caches)
-            # 保存微调后的结果
-            _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
-            os.makedirs(os.path.dirname(_path), exist_ok=True)
-            torch.save(self.gaussians.capture(), _path)
-            torch.cuda.empty_cache()
-            gc.collect()
-            self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
+                            overlap_caches[curr_fid][d_idx] = (
+                                render_pkg["render"].detach().clone()
+                            )
+
+                # 2. 载入当前窗口 (w) 模型准备微调
+                _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+                curr_model_data = torch.load(_path, weights_only=False)
+                self.gaussians.restore(curr_model_data, self.opt)
+                # self.gaussians.restore(torch.load(os.path.join(self.args.model_path, f"phase1_win{win_idx}.pth")), self.opt)
+                # self.gaussians._start_frame[:] = start
+                # self.gaussians._expire_frame[:] = end
+                self.gaussians.bind_current_window(start, end)
+                self.train_phase2_finetune(win_idx, start, end, overlap_caches)
+                # 保存微调后的结果
+                _path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
+                os.makedirs(os.path.dirname(_path), exist_ok=True)
+                torch.save(self.gaussians.capture(), _path)
+                torch.cuda.empty_cache()
+                gc.collect()
+                self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
