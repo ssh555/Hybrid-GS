@@ -376,7 +376,7 @@ class TrainerSWinGS(Trainer4DGS):
         
         for iteration in range(1, finetune_iters + 1):
             self.global_iter += 1
-            self.gaussians.update_learning_rate(iteration)
+            self.gaussians.update_learning_rate(self.iterations + iteration)
 
             batch_size = self.args.batch_size
             loss = 0
@@ -451,7 +451,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians.restore(model_params, self.opt)
 
     def train(self):
-        ignore_phase1 = True
+        ignore_phase1 = False
         ignore_phase2 = False
         force_time_anchor = True  # 强制时间锚点牵引修复
         self.metrics_tracker.start_timer()
