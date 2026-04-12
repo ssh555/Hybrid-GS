@@ -521,6 +521,19 @@ class TrainerSWinGS(Trainer4DGS):
                     # 不继承的动态点直接标记死亡，等待窗口后 prune
                     dead_mask = (~inherit_mask) & (self.gaussians._mask_dynamic != 1)
                     self.gaussians._expire_frame[dead_mask] = overlap_frame - 1
+                    # ==========================================================
+                    # 🚀 【核心修复：时间锚点强制牵引】
+                    # 解决显式4DGS继承时“时间中心滞留过去”导致的云雾与致密化爆炸
+                    # ==========================================================
+                    prev_start = self.window_blocks[win_idx-1][0]
+                    slide_frames = start - prev_start
+                    fps = 30.0  # ⚠️ 注：请确保这里使用的是你视频实际的 FPS
+                    slide_time = slide_frames / fps
+
+                    # 仅仅对【继承续命的动态点 (dynamic_alive)】进行时间轴平移！
+                    if dynamic_alive.any() and hasattr(self.gaussians, '_t'):
+                        self.gaussians._t[dynamic_alive] += slide_time
+                        print(f"⏩ 时间轴校准：已将 {dynamic_alive.sum().item()} 个存活动态高斯的 _t 强行推进了 {slide_time:.2f} 秒！")
             self.train_phase1_window(win_idx, start, end)
             
             # 必须在第一阶段结束时持久化局部窗口模型
