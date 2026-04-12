@@ -542,10 +542,10 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
-            # if param_group["name"] == "t" and self.gaussian_dim == 4:
-            #     lr = self.xyz_scheduler_args(iteration)
-            #     param_group['lr'] = lr
-            #     return lr
+            if param_group["name"] == "t" and self.gaussian_dim == 4:
+                lr = self.xyz_scheduler_args(iteration)
+                param_group['lr'] = lr
+                return lr
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
