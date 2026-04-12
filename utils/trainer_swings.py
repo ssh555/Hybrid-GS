@@ -300,9 +300,9 @@ class TrainerSWinGS(Trainer4DGS):
                         if iteration % self.opt.densification_interval == 0: 
                             self.gaussians.densify_and_prune(self.densify_grad_threshold, self.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = self.enable_split)
                                 
-                if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
-                    self.gaussians.reset_opacity()
-                        
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
+                        self.gaussians.reset_opacity()
+                            
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
 
