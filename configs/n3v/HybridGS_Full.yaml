@@ -65,13 +65,13 @@ OptimizationParams:
   # [新增] SWinGS 与 HybridGS 专属超参数
   # ==========================================================
   swin_size: 102             # SWinGS 滑动窗口大小 (基于显存和视频长度调整)
-  lambda_time: 0.00003       # SWinGS: 时间一致性正则化惩罚系数
+  lambda_time: 1.0       # SWinGS: 时间一致性正则化惩罚系数
   tau_avg: 0.001             # HybridGS 硬约束：平均位移阈值
   tau_max: 0.005            # HybridGS 硬约束：最大瞬时位移阈值
   freeze_start: 2650       # HybridGS 硬约束：冻结静态背景开始迭代次数
-  freeze_end: 4650         # HybridGS 硬约束：冻结静态背景结束迭代次数
+  freeze_end: 5650         # HybridGS 硬约束：冻结静态背景结束迭代次数
   freeze_internal: 1000    # HybridGS 硬约束：冻结静态背景的迭代间隔
-  lambda_d: 0.00003             # HybridGS 软约束：位移收敛正则化系数
+  lambda_d: 0.00005             # HybridGS 软约束：位移收敛正则化系数
   warmup_start: 0.1          # SWinGS Warmup 阶段开始迭代比例
   warmup_end: 0.25            # SWinGS Warmup 阶段结束迭代比例
   finetune_iterations: 2000      # SWinGS 细调阶段迭代数 (在 Warmup 之后，全面开启时间一致性正则化，进一步提升时间一致性)
