@@ -555,10 +555,7 @@ class TrainerSWinGS(Trainer4DGS):
                     dynamic_keep = (
                         (dynamic != 1)
                         & (expire >= next_start)
-                        & (
-                            (opacity > 0.01)
-                            | (self.gaussians.max_radii2D > 3)
-                        )
+                        & (opacity > 0.01)
                     )
 
                     keep_mask = static_keep | dynamic_keep
