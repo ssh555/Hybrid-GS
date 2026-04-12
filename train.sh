@@ -30,20 +30,20 @@ do
     CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/HybridGS_${Full}.yaml  --model_path $model_path \
     --source_path $source_path 
     CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/HybridGS_${Full}.yaml  --model_path $model_path \
-    --source_path $source_path --start_checkpoint $model_path/chkpnt_10000.pth
+    --source_path $source_path --start_checkpoint $model_path/chkpnt_12000.pth
 done
 
-# SwinGS SHORT
-for data in ${dataset[@]};
-do
-    model_path=output/swings/${data}/${short}
-    source_path=datasets/${data}/${short}
-    # 在yaml配置文件中恢复了model_path和source_path的默认值，因此这里不需要再传入参数了。
-    CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/SwinGS_${Short}.yaml  --model_path $model_path \
-    --source_path $source_path 
-    CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/SwinGS_${Short}.yaml  --model_path $model_path \
-    --source_path $source_path --start_checkpoint $model_path/chkpnt_8000.pth
-done
+# # SwinGS SHORT
+# for data in ${dataset[@]};
+# do
+#     model_path=output/swings/${data}/${short}
+#     source_path=datasets/${data}/${short}
+#     # 在yaml配置文件中恢复了model_path和source_path的默认值，因此这里不需要再传入参数了。
+#     CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/SwinGS_${Short}.yaml  --model_path $model_path \
+#     --source_path $source_path 
+#     CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/SwinGS_${Short}.yaml  --model_path $model_path \
+#     --source_path $source_path --start_checkpoint $model_path/chkpnt_8000.pth
+# done
 
 # SwinGS Full
 for data in ${dataset[@]};
@@ -54,7 +54,7 @@ do
     CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/SwinGS_${Full}.yaml  --model_path $model_path \
     --source_path $source_path 
     CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/SwinGS_${Full}.yaml  --model_path $model_path \
-    --source_path $source_path --start_checkpoint $model_path/chkpnt_10000.pth
+    --source_path $source_path --start_checkpoint $model_path/chkpnt_12000.pth
 done
 
 
