@@ -212,6 +212,7 @@ class TrainerSWinGS(Trainer4DGS):
 
             batch_size = self.args.batch_size
             batch_point_grad, batch_visibility_filter, batch_radii = [], [], []
+            batch_point_grad_static, batch_visibility_filter_static, batch_radii_static = [], [], []
             loss = 0
             
             for batch_idx in range(batch_size):
@@ -225,6 +226,10 @@ class TrainerSWinGS(Trainer4DGS):
 
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 alpha = render_pkg["alpha"]
+
+                viewspace_point_tensor_static = render_pkg.get("viewspace_points_static", [])
+                visibility_filter_static = render_pkg.get("visibility_filter_static", [])
+                radii_static = render_pkg.get("radii_static", [])
 
                 Ll1 = l1_loss(image, gt_image)
                 Lssim = 1.0 - ssim(image, gt_image)
@@ -270,6 +275,12 @@ class TrainerSWinGS(Trainer4DGS):
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
 
+                static = len(viewspace_point_tensor_static) > 0
+                if static:
+                    batch_point_grad_static.append(torch.norm(viewspace_point_tensor_static.grad[:,:2], dim=-1))
+                    batch_radii_static.append(radii_static)
+                    batch_visibility_filter_static.append(visibility_filter_static)
+
             # 梯度累加与优化器 (保留你所有原版逻辑)
             if batch_size > 1:
                 visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
@@ -278,28 +289,49 @@ class TrainerSWinGS(Trainer4DGS):
                 batch_viewspace_point_grad = torch.stack(batch_point_grad,1).sum(1)
                 batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                 batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
+                if static:
+                    visibility_count_static = torch.stack(batch_visibility_filter_static,1).sum(1)
+                    visibility_filter_static = visibility_count_static > 0
+                    radii_static = torch.stack(batch_radii_static,1).max(1)[0]
+                    batch_viewspace_point_grad_static = torch.stack(batch_point_grad_static,1).sum(1)
+                    batch_viewspace_point_grad_static[visibility_filter_static] = batch_viewspace_point_grad_static[visibility_filter_static] * batch_size / visibility_count_static[visibility_filter_static]
+                    batch_viewspace_point_grad_static = batch_viewspace_point_grad_static.unsqueeze(1)
                 if self.gaussians.gaussian_dim == 4:
                     batch_t_grad = self.gaussians._t.grad.clone()[:,0].detach()
                     batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                     batch_t_grad = batch_t_grad.unsqueeze(1)
             else:
+                visibility_filter = batch_visibility_filter[0]
+                radii = batch_radii[0]
+                batch_viewspace_point_grad = batch_point_grad[0].unsqueeze(1)
+                if static:
+                    visibility_filter_static = batch_visibility_filter_static[0]
+                    radii_static = batch_radii_static[0]
+                    batch_viewspace_point_grad_static = (
+                        batch_point_grad_static[0].unsqueeze(1)
+                    )
                 if self.gaussians.gaussian_dim == 4:
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
             with torch.no_grad():
-                if iteration < self.densify_until_iter and (self.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0]) < self.densify_until_num_points):
+                if iteration < self.opt.densify_until_iter and (self.opt.densify_until_num_points < 0 or (self.gaussians.get_xyz.shape[0] + (self.gaussians.get_static_xyz.shape[0] if static else 0)) < self.opt.densify_until_num_points):
                     self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    
+                    if static:
+                        self.gaussians.static_max_radii2D[visibility_filter_static] = torch.max(self.gaussians.static_max_radii2D[visibility_filter_static], radii_static[visibility_filter_static])
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                        self.gaussians.add_densification_stats_static(viewspace_point_tensor_static, visibility_filter_static) if static else None
                     else:
                         self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
-
+                        if static:
+                            self.gaussians.add_densification_stats_grad_static(batch_viewspace_point_grad_static, visibility_filter_static)
                     if iteration > self.densify_from_iter: 
                         size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
                         if iteration % self.opt.densification_interval == 0: 
                             self.gaussians.densify_and_prune(self.densify_grad_threshold, self.thresh_opa_prune, self.scene.cameras_extent, size_threshold, self.opt.densify_grad_t_threshold, enable_split = self.enable_split)
-                                
+                            if hasattr(self.gaussians, 'dynamic2static'):
+                                self.gaussians.dynamic2static(self.opt.scale_t_threshold)
+
                 if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
                     self.gaussians.reset_opacity()
                         
@@ -315,13 +347,18 @@ class TrainerSWinGS(Trainer4DGS):
                     self.loss_iterations.append(self.global_iter)
                     self.loss_history.append(loss)
                     self.pts_4d_history.append(self.gaussians.get_xyz.shape[0])
-                    self.pts_3d_history.append(0)
+                    try:
+                        num_3d = self.gaussians.get_static_xyz.shape[0] if (hasattr(self.gaussians, 'get_static_xyz') and self.gaussians.get_static_xyz is not None) else 0
+                    except:
+                        num_3d = 0
+                    self.pts_3d_history.append(num_3d)
 
                 # 每个窗口结束前保留测试和保存
                 if iteration == self.iterations:
                     self.evaluate(self.global_iter, start_frame=start_frame, end_frame=end_frame, tag=f"Phase1_Win{win_idx}")
                     os.makedirs(self.args.model_path, exist_ok=True)
-                    self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
+                    num_3d = self.gaussians.get_static_xyz.shape[0] if static else 0
+                    self.metrics_tracker.record_training_stats(self.global_iter, num_3d, self.gaussians.get_xyz.shape[0])
 
         progress_bar.close()
 

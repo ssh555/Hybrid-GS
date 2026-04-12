@@ -4,7 +4,7 @@ num_pts: 20_0000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: True
-batch_size: 4
+batch_size: 2
 exhaust_test: False
 # start_checkpoint: "output/swings/miku_shaungxue_daxi/full/chkpnt_10000.pth"
 

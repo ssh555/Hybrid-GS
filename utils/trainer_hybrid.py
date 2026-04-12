@@ -184,6 +184,15 @@ class TrainerHybrid(TrainerSWinGS):
                     batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                     batch_t_grad = batch_t_grad.unsqueeze(1)
             else:
+                visibility_filter = batch_visibility_filter[0]
+                radii = batch_radii[0]
+                batch_viewspace_point_grad = batch_point_grad[0].unsqueeze(1)
+                if static:
+                    visibility_filter_static = batch_visibility_filter_static[0]
+                    radii_static = batch_radii_static[0]
+                    batch_viewspace_point_grad_static = (
+                        batch_point_grad_static[0].unsqueeze(1)
+                    )
                 if self.gaussians.gaussian_dim == 4:
                     batch_t_grad = self.gaussians._t.grad.clone().detach()
 
@@ -195,6 +204,7 @@ class TrainerHybrid(TrainerSWinGS):
                     
                     if batch_size == 1:
                         self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
+                        self.gaussians.add_densification_stats_static(viewspace_point_tensor_static, visibility_filter_static) if static else None
                     else:
                         self.gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if self.gaussians.gaussian_dim == 4 else None)
                         if static:
