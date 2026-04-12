@@ -917,6 +917,10 @@ class GaussianModel:
         self.denom[update_filter] += 1
         if self.gaussian_dim == 4:
             self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+
+    def add_densification_stats_static(self, viewspace_point_tensor, update_filter):
+        self.static_xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.static_denom[update_filter] += 1
         
     def add_densification_stats_grad(self, viewspace_point_grad, update_filter, avg_t_grad=None):
         self.xyz_gradient_accum[update_filter] += viewspace_point_grad[update_filter]
