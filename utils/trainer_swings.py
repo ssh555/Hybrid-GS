@@ -332,8 +332,8 @@ class TrainerSWinGS(Trainer4DGS):
                             if hasattr(self.gaussians, 'dynamic2static'):
                                 self.gaussians.dynamic2static(self.opt.scale_t_threshold)
 
-                if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
-                    self.gaussians.reset_opacity()
+                    if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.densify_from_iter):
+                        self.gaussians.reset_opacity()
                         
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
