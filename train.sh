@@ -30,7 +30,7 @@ do
     CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/HybridGS_${Full}.yaml  --model_path $model_path \
     --source_path $source_path 
     CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/HybridGS_${Full}.yaml  --model_path $model_path \
-    --source_path $source_path --start_checkpoint $model_path/chkpnt_12000.pth
+    --source_path $source_path --start_checkpoint $model_path/chkpnt_10000.pth
 done
 
 # # SwinGS SHORT
@@ -54,7 +54,7 @@ do
     CUDA_VISIBLE_DEVICES=${device} python3 train.py --config configs/${config}/SwinGS_${Full}.yaml  --model_path $model_path \
     --source_path $source_path 
     CUDA_VISIBLE_DEVICES=${device} python3 render.py --config configs/${config}/SwinGS_${Full}.yaml  --model_path $model_path \
-    --source_path $source_path --start_checkpoint $model_path/chkpnt_12000.pth
+    --source_path $source_path --start_checkpoint $model_path/chkpnt_10000.pth
 done
 
 
