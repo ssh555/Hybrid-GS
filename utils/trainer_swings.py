@@ -453,7 +453,7 @@ class TrainerSWinGS(Trainer4DGS):
     def train(self):
         ignore_phase1 = False
         ignore_phase2 = False
-        force_time_anchor = False  # 强制时间锚点牵引修复
+        force_time_anchor = True  # 强制时间锚点牵引修复
         self.metrics_tracker.start_timer()
         
         # ==========================================
