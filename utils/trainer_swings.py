@@ -451,7 +451,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.gaussians.restore(model_params, self.opt)
 
     def train(self):
-        ignore_phase1 = True
+        ignore_phase1 = False
         ignore_phase2 = False
         force_time_anchor = False  # 强制时间锚点牵引修复
         self.metrics_tracker.start_timer()
@@ -562,7 +562,7 @@ class TrainerSWinGS(Trainer4DGS):
                         dynamic_keep = (
                             (dynamic != 1)
                             & (expire >= next_start)
-                            & (opacity > 0.01)
+                            & (opacity > self.opt.win_end_prune_opacity_threshold)
                         )
 
                         keep_mask = static_keep | dynamic_keep
