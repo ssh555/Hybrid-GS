@@ -71,8 +71,8 @@ OptimizationParams:
   warmup_iterations: 2000        # SWinGS Warmup 阶段开始迭代比例
   finetune_iterations: 3000   # SWinGS 细调阶段迭代比例 (在 Warmup 之后，全面开启时间一致性正则化)
   densify_from_iter_after_freeze: 100  # 冻结后增密的起始迭代次数 (更早开始增密，提升细节表现)
-  densify_until_iter_after_freeze: 500  # SWinGS / HybridGS 冻结后继续增密的迭代次数
-  densify_grad_threshold_after_freeze: 0.0004  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
+  densify_until_iter_after_freeze: 1000  # SWinGS / HybridGS 冻结后继续增密的迭代次数
+  densify_grad_threshold_after_freeze: 0.00025  # SWinGS / HybridGS 冻结后增密的梯度阈值 (更严格)
   thresh_opa_prune_after_freeze: 0.006  # SWinGS / HybridGS 冻结后不确定点的透明度剪枝阈值 (更严格)
   iterations_after_freeze: 6000  # SWinGS / HybridGS 冻结后总迭代次数 (包含增密迭代)
   enable_split_after_freeze: True  # SWinGS / HybridGS 冻结后是否启用分割 (进一步提升细节表现)
