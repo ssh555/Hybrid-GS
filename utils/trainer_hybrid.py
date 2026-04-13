@@ -113,7 +113,7 @@ class TrainerHybrid(TrainerSWinGS):
 
                 # --- 软约束 (解冻后生效) ---
                 total_reg_loss = 0.0  
-                if self.use_soft:
+                if self.use_soft and iteration < self.opt.soft_end:
                     warmup_start = int(total_iters * self.opt.warmup_start) 
                     warmup_end = int(total_iters * self.opt.warmup_end)
                     if iteration < warmup_start: current_lambda_d = 0.0

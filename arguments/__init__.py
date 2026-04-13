@@ -145,6 +145,7 @@ class OptimizationParams(ParamGroup):
         self.densify_until_num_points_after_freeze = 2800000 # 冻结后增密的最大点数 (更严格)
         self.densify_from_iter_after_freeze = 100  # 冻结后增密的起始迭代次数 (更早开始增密，提升细节表现)
         self.win_end_prune_opacity_threshold = 0.012 # SWinGS 滑动窗口结束时的透明度剪枝阈值 (更严格)
+        self.soft_end = 0.80              # HybridGS软约束 阶段结束迭代比例
 
 
         super().__init__(parser, "Optimization Parameters")
