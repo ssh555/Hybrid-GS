@@ -59,7 +59,7 @@ OptimizationParams:
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
-  lambda_motion: 0.0
+  lambda_motion: 0.1
   
   # ==========================================================
   # [新增] SWinGS 与 HybridGS 专属超参数

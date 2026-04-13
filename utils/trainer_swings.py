@@ -244,8 +244,21 @@ class TrainerSWinGS(Trainer4DGS):
                 # 保留你原代码的 Motion & Rigid Loss (仅解冻后生效)
                 if ((self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)):
                     current_t = t_id / self.total_frames
-                    _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_mask)
+                    alive_mask = (self.gaussians._start_frame <= end_frame) & (self.gaussians._expire_frame >= start_frame)
+                    active_dynamic_mask = (self.gaussians._mask_dynamic != 1) & alive_mask
+                    active_indices = torch.nonzero(active_dynamic_mask, as_tuple=True)[0]
                     
+                    if active_indices.numel() > 0:
+                        if active_indices.numel() > 30000:
+                            perm = torch.randperm(active_indices.numel(), device=active_indices.device)[:30000]
+                            active_indices = active_indices[perm]
+                            sampled_mask = torch.zeros_like(active_dynamic_mask)
+                            sampled_mask[active_indices] = True
+                            active_dynamic_mask = sampled_mask
+
+                    _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
+
+
                     if self.opt.lambda_rigid > 0:
                         k_neighbors = 10
                         xyz_active = self.gaussians.get_xyz[active_mask].contiguous()
