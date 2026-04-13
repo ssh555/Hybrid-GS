@@ -20,7 +20,7 @@ class TrainerSWinGS(Trainer4DGS):
         self.overlap_size = 8
 
 
-        self.max_window_points = getattr(args, 'max_window_points', 2_000_000)
+        self.max_window_points = getattr(args, 'max_window_points', 3_000_000)
 
         self.densify_until_iter = self.opt.densify_until_iter
         self.densify_grad_threshold = self.opt.densify_grad_threshold
@@ -468,7 +468,7 @@ class TrainerSWinGS(Trainer4DGS):
     def train(self):
         ignore_phase1 = False
         ignore_phase2 = False
-        force_time_anchor = True  # 强制时间锚点牵引修复
+        force_time_anchor = False  # 强制时间锚点牵引修复
         skip_freeze_win = False
         self.metrics_tracker.start_timer()
         
