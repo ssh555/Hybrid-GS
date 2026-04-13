@@ -114,7 +114,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
-        self.scale_t_threshold =3.0
+        self.scale_t_threshold = 3.0
 
         # ==========================================================
         # [新增] SWinGS 与 HybridGS 专属超参数

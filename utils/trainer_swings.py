@@ -241,6 +241,7 @@ class TrainerSWinGS(Trainer4DGS):
                     sky = 1 - viewpoint_cam.gt_alpha_mask
                     current_loss = current_loss + self.opt.lambda_opa_mask * (- sky * torch.log(1 - o)).mean()
 
+                motion_loss = 0.0
                 # 保留你原代码的 Motion & Rigid Loss (仅解冻后生效)
                 if ((self.opt.lambda_motion > 0) or (self.opt.lambda_rigid > 0)):
                     current_t = t_id / self.total_frames
@@ -256,29 +257,30 @@ class TrainerSWinGS(Trainer4DGS):
                             sampled_mask[active_indices] = True
                             active_dynamic_mask = sampled_mask
 
-                    _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
+                        _, active_velocity = self.gaussians.get_current_covariance_and_mean_offset(1.0, current_t, mask=active_dynamic_mask)
 
 
-                    if self.opt.lambda_rigid > 0:
-                        k_neighbors = 10
-                        xyz_active = self.gaussians.get_xyz[active_mask].contiguous()
-                        if xyz_active.shape[0] > 30000:
-                            perm = torch.randperm(xyz_active.shape[0], device="cuda")[:30000]
-                            xyz_cur = xyz_active[perm].contiguous()
-                            velocity_cur = active_velocity[perm]
-                        else:
-                            xyz_cur = xyz_active
-                            velocity_cur = active_velocity
+                        if self.opt.lambda_rigid > 0:
+                            k_neighbors = 10
+                            xyz_active = self.gaussians.get_xyz[active_mask].contiguous()
+                            if xyz_active.shape[0] > 30000:
+                                perm = torch.randperm(xyz_active.shape[0], device="cuda")[:30000]
+                                xyz_cur = xyz_active[perm].contiguous()
+                                velocity_cur = active_velocity[perm]
+                            else:
+                                xyz_cur = xyz_active
+                                velocity_cur = active_velocity
 
-                        if xyz_cur.shape[0] > k_neighbors:
-                            idx, dist = knn(xyz_cur[None].detach(), xyz_cur[None].detach(), k_neighbors)
-                            weight = torch.exp(-100 * dist)
-                            vel_dist = torch.norm(velocity_cur[idx.squeeze(0)] - velocity_cur.unsqueeze(1), p=2, dim=-1)
-                            coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_cur.shape[0]
-                            current_loss = current_loss + (self.opt.lambda_rigid * 5.0) * coherence_loss
+                            if xyz_cur.shape[0] > k_neighbors:
+                                idx, dist = knn(xyz_cur[None].detach(), xyz_cur[None].detach(), k_neighbors)
+                                weight = torch.exp(-100 * dist)
+                                vel_dist = torch.norm(velocity_cur[idx.squeeze(0)] - velocity_cur.unsqueeze(1), p=2, dim=-1)
+                                coherence_loss = (weight * vel_dist).sum() / k_neighbors / xyz_cur.shape[0]
+                                current_loss = current_loss + (self.opt.lambda_rigid * 5.0) * coherence_loss
 
-                    if self.opt.lambda_motion > 0:
-                        current_loss = current_loss + (self.opt.lambda_motion * 2.0) * active_velocity.norm(p=2, dim=1).mean()
+                        if self.opt.lambda_motion > 0:
+                            motion_loss = self.opt.lambda_motion * active_velocity.norm(p=2, dim=1).mean()
+                            current_loss = current_loss + motion_loss
 
                 current_loss = current_loss / batch_size
                 current_loss.backward()
@@ -467,6 +469,7 @@ class TrainerSWinGS(Trainer4DGS):
         ignore_phase1 = False
         ignore_phase2 = False
         force_time_anchor = True  # 强制时间锚点牵引修复
+        skip_freeze_win = False
         self.metrics_tracker.start_timer()
         
         # ==========================================
@@ -476,12 +479,64 @@ class TrainerSWinGS(Trainer4DGS):
             for win_idx, (start, end) in enumerate(self.window_blocks):
                 _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
 
-                # if win_idx <= self.opt.freeze_end_idx:
-                #     if os.path.exists(_path):
-                #         _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
-                #         prev_model_data = torch.load(_path, weights_only=False)
-                #         self.gaussians.restore(prev_model_data, self.opt)
-                #         continue  # 跳过已完成的窗口
+                if skip_freeze_win and win_idx <= self.opt.freeze_end_idx:
+                    if os.path.exists(_path):
+                        _path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
+                        prev_model_data = torch.load(_path, weights_only=False)
+                        self.gaussians.restore(prev_model_data, self.opt)
+
+                        if win_idx < len(self.window_blocks) - 1:
+                            next_start = self.window_blocks[win_idx + 1][0]
+                            with torch.no_grad():
+                                # 1. 静态背景点 (_mask_dynamic == 1) 拥有免死金牌，永远保留。
+                                # 2. 动态点必须满足不透明度 > 0.01 才允许进入下一个窗口。
+                                dynamic = self.gaussians._mask_dynamic.view(-1)
+                                opacity = self.gaussians.get_opacity.view(-1)
+                                expire = self.gaussians._expire_frame.view(-1)
+
+                                static_keep = (dynamic == 1)
+
+                                dynamic_keep = (
+                                    (dynamic != 1)
+                                    & (expire >= next_start)
+                                    & (opacity > self.opt.win_end_prune_opacity_threshold)
+                                )
+
+                                keep_mask = static_keep | dynamic_keep
+                                # =========================
+                                # 二级限制：最多 200w
+                                # =========================
+                                max_pts = self.max_window_points
+                                keep_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
+
+                                if keep_indices.numel() > max_pts:
+                                    static_indices = torch.nonzero(static_keep, as_tuple=True)[0]
+                                    dyn_indices = torch.nonzero(dynamic_keep, as_tuple=True)[0]
+
+                                    remain = max_pts - static_indices.numel()
+                                    remain = max(remain, 0)
+
+                                    if dyn_indices.numel() > remain:
+                                        dyn_opacity = opacity[dyn_indices]
+                                        topk = torch.topk(dyn_opacity, remain, sorted=False).indices
+                                        dyn_indices = dyn_indices[topk]
+
+                                    final_keep = torch.zeros_like(keep_mask)
+                                    final_keep[static_indices] = True
+                                    final_keep[dyn_indices] = True
+                                    keep_mask = final_keep
+                                prune_mask = ~keep_mask
+                                print(
+                                    f"[Window {win_idx}] total={keep_mask.numel()} "
+                                    f"keep={keep_mask.sum().item()} "
+                                    f"prune={prune_mask.sum().item()}"
+                                )
+                                # 你需要在 gaussian_model.py 中实现一个 prune_by_mask 函数
+                                # 用于在底层张量和优化器中剔除 keep_mask == False 的点
+                                if prune_mask.any():
+                                    self.gaussians.prune_points(prune_mask)
+                                    print(f"🧹 窗口 {win_idx} 结束，清理了 {prune_mask.sum().item()} 个过期动态点！")
+                        continue  # 跳过已完成的窗口
 
                 if win_idx > self.opt.freeze_end_idx:
                     self.densify_until_iter = self.opt.densify_until_iter_after_freeze
