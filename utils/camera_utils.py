@@ -118,28 +118,42 @@ def camera_to_JSON(id, camera : Camera):
 
 
 
+import os
+import torch
+import numpy as np
+
 def get_camera_metadata(scene, dataset_path):
     """
-    获取相机元数据。如果存在缓存则直接读取，否则进行一次性解析并保存。
+    获取相机元数据及完整的相机列表缓存。
+    使用 .pt 格式极速加载复杂的 Camera 对象。
     """
-    cache_path = os.path.join(dataset_path, "camera_structure_cache.json")
+    # ⚠️ 修改后缀名为 .pt，专门用于存放 PyTorch/Pickle 对象
+    cache_path = os.path.join(dataset_path, "camera_list_cache.pt")
     
-    # 1. 获取原始相机列表 (这一步 scene 内部会有一次 IO，但无法完全避免)
+    # =======================================================
+    # 1. 尝试从本地缓存“秒拉”完整数据
+    # =======================================================
+    if os.path.exists(cache_path):
+        try:
+            print(f"[缓存] 正在极速读取本地相机缓存文件: {cache_path}")
+            # 从硬盘直接映射回内存
+            cache_data = torch.load(cache_path)
+            train_cams = cache_data["train_cams"]
+            max_frames = cache_data["max_frames"]
+            max_cams = cache_data["max_cams"]
+            
+            print(f"[缓存] ⚡ 成功秒拉相机结构: {max_cams} 视角 x {max_frames} 帧，总计 {len(train_cams)} 个相机！")
+            return train_cams, max_frames, max_cams
+        except Exception as e:
+            print(f"[缓存] 读取失败，文件可能损坏，将重新解析。原因: {e}")
+
+    # =======================================================
+    # 2. 缓存不存在或失效，执行原始的极慢解析逻辑
+    # =======================================================
+    print("[解析] 未命中缓存，正在从 Scene 中提取原始相机数据 (这可能需要较长时间)...")
     train_cams = [c[1] if isinstance(c, tuple) else c for c in scene.getTrainCameras()]
     total_count = len(train_cams)
 
-    # 2. 检查缓存是否存在且有效
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r") as f:
-                meta = json.load(f)
-            if meta.get("total_count") == total_count:
-                print(f"[缓存] 成功加载相机结构: {meta['max_cams']} 视角 x {meta['max_frames']} 帧")
-                return train_cams, meta['max_frames'], meta['max_cams']
-        except Exception:
-            pass
-
-    # 3. 缓存失效或不存在，执行解析逻辑
     print(f"[解析] 正在分析 {total_count} 个相机的时空结构，请稍候...")
     base_cam = train_cams[0]
     base_T = base_cam.T.cpu().numpy() if hasattr(base_cam.T, 'cpu') else base_cam.T
@@ -153,15 +167,21 @@ def get_camera_metadata(scene, dataset_path):
             max_frames += 1
         else:
             break
-    
+            
     max_cams = total_count // max_frames
     
-    # 保存结果到 JSON
-    with open(cache_path, "w") as f:
-        json.dump({
-            "max_frames": max_frames,
-            "max_cams": max_cams,
-            "total_count": total_count
-        }, f)
+    # =======================================================
+    # 3. 将【完整的相机列表】打包存入硬盘，下次启动秒进
+    # =======================================================
+    print("[缓存] 正在将完整相机数据写入本地物理缓存，下次启动将秒进...")
+    cache_data = {
+        "train_cams": train_cams,
+        "max_frames": max_frames,
+        "max_cams": max_cams,
+        "total_count": total_count
+    }
+    # 保存整个字典，包括庞大的 train_cams 列表
+    torch.save(cache_data, cache_path)
+    print(f"[缓存] 写入完成！路径: {cache_path}")
     
     return train_cams, max_frames, max_cams
