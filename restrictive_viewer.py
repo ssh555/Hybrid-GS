@@ -1,5 +1,6 @@
 # restrictive_viewer.py
 import time
+import os
 import math
 import torch
 import numpy as np
@@ -15,6 +16,9 @@ from scene import Scene, GaussianModel
 from gaussian_renderer import render
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift, getProjectionMatrixCV, pix2ndc
 from utils.camera_utils import get_camera_metadata
+
+import concurrent.futures
+import threading
 
 class RenderCam:
     def __init__(self, base_cam):
@@ -61,6 +65,68 @@ class RenderCam:
         print(f"World-View Transform (first 3 rows):\n{self.world_view_transform.cpu().numpy()[:3]}")
         print(f"Projection Matrix (first 3 rows):\n{self.projection_matrix.cpu().numpy()[:3]}")
         print("===========================")
+
+# ==============================
+# 🚀 异步滑动窗口缓存管理器
+# ==============================
+class AsyncWindowCache:
+    def __init__(self, base_dir, models_dict, max_cache=3):
+        self.base_dir = base_dir
+        self.models_dict = models_dict
+        self.max_cache = max_cache
+        self.cache = {}         # 存放就绪的窗口数据 {win_idx: data_tuple}
+        self.loading_tasks = {} # 存放正在加载的线程任务 {win_idx: Future}
+        self.lock = threading.Lock()
+        # 开启 1 个后台独立线程，专门负责磁盘读取和总线传输，绝不阻塞主渲染循环！
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    def _load_pth(self, win_idx):
+        """后台线程执行的实际加载逻辑"""
+        rel_path = self.models_dict[win_idx]
+        abs_path = os.path.join(self.base_dir, rel_path)
+        # 因为瘦身后的模型很小，直接加载到 CUDA 显存中，避免主线程渲染时的 CPU->GPU 拷贝卡顿
+        data = torch.load(abs_path, map_location='cuda', weights_only=False)
+        with self.lock:
+            self.cache[win_idx] = data
+            if win_idx in self.loading_tasks:
+                del self.loading_tasks[win_idx]
+        return data
+
+    def get_window(self, win_idx):
+        """主线程调用：获取当前窗口数据，并智能调度后台预加载"""
+        # 1. 每次请求时，刷新预加载任务（自动加载前后相邻窗口）
+        self._prefetch(win_idx)
+        
+        # 2. 检查命中情况：如果用户拖动进度条发生了大跳跃（未命中）
+        if win_idx not in self.cache:
+            print(f"\n[缓存调度] ⚠️ 缓存未命中，发生大跨度跳跃！正在阻塞加载窗口 {win_idx}...")
+            # 如果后台还没开始加载它，马上派发任务
+            if win_idx not in self.loading_tasks:
+                self.loading_tasks[win_idx] = self.executor.submit(self._load_pth, win_idx)
+            # 阻塞主线程，直到这个急需的窗口加载完毕
+            self.loading_tasks[win_idx].result() 
+            print(f"[缓存调度] ⚡ 窗口 {win_idx} 急加载完成，恢复渲染！")
+        
+        # 3. 完美命中，直接从内存/显存返回，耗时 0.0001 秒
+        return self.cache[win_idx]
+
+    def _prefetch(self, current_win_idx):
+        """智能缓存替换算法：保留 [current-1, current, current+1]"""
+        with self.lock:
+            # 定义需要保活的窗口索引（当前、后一个、前一个）
+            keep_indices = {current_win_idx - 1, current_win_idx, current_win_idx + 1}
+            
+            # 1. LRU 淘汰：清理过期缓存，瞬间释放显存
+            keys_to_delete = [k for k in list(self.cache.keys()) if k not in keep_indices]
+            for k in keys_to_delete:
+                del self.cache[k]
+                
+            # 2. 发起预加载：检查需要的窗口是否在路上，不在就派发任务
+            for p_idx in keep_indices:
+                if 0 <= p_idx < len(self.models_dict):
+                    if p_idx not in self.cache and p_idx not in self.loading_tasks:
+                        # 开启后台静默加载
+                        self.loading_tasks[p_idx] = self.executor.submit(self._load_pth, p_idx)
 
 # ==============================
 # Utils
@@ -126,12 +192,17 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
     print(f"[渲染器] 正在读取模型权重: {args.start_checkpoint}")
     checkpoint_data, _ = torch.load(args.start_checkpoint, weights_only=False)
     is_swings = isinstance(checkpoint_data, dict) and checkpoint_data.get("is_swings_sequence", False)
-    
+
+    window_cache = None # [新增]
+
     if is_swings:
         print("[渲染器] 🚀 检测到 SWinGS 长序列超级大模型！将根据时间轴动态加载基底！")
         window_blocks = checkpoint_data["window_blocks"]
         models_dict = checkpoint_data["models"]
         current_loaded_win_idx = -1
+        # [新增] 初始化异步缓存，挂载模型路径
+        base_model_dir = os.path.dirname(os.path.abspath(args.start_checkpoint))
+        window_cache = AsyncWindowCache(base_model_dir, models_dict)
     else:
         print("[渲染器] 📌 检测到传统单体模型，正在直接恢复权重...")
         gaussians.restore(checkpoint_data, None)
@@ -205,11 +276,9 @@ def main(dataset: ModelParams, pipe: PipelineParams, args):
                     break
                     
             if target_win_idx != current_loaded_win_idx:
-                gaussians.restore(models_dict[target_win_idx], None)
+                win_data_tuple = window_cache.get_window(target_win_idx)
+                gaussians.restore(win_data_tuple, None)
                 current_loaded_win_idx = target_win_idx
-                if hasattr(gaussians, '_start_frame'):
-                    gaussians._start_frame[:] = window_blocks[target_win_idx][0]
-                    gaussians._expire_frame[:] = window_blocks[target_win_idx][1]
 
 
         for client in server.get_clients().values():

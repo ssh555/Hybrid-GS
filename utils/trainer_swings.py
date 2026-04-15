@@ -776,10 +776,14 @@ class TrainerSWinGS(Trainer4DGS):
 
 
     def _save_merged_checkpoint(self, name_suffix):
-        """【无损瘦身版】多窗口合并打包。自动剔除渲染不需要的优化器状态，防止预加载时爆内存。"""
+        """【极致瘦身解耦版】多窗口合并打包。数据与索引分离，彻底杜绝渲染器内存爆满。"""
         os.makedirs(self.args.model_path, exist_ok=True)
         
-        merged_windows = {}
+        # [新增] 创建专门存放压缩窗口数据的文件夹
+        compressed_dir = os.path.join(self.args.model_path, "compressed_windows")
+        os.makedirs(compressed_dir, exist_ok=True)
+        
+        merged_windows_paths = {}
         for win_idx in range(len(self.window_blocks)):
             if win_idx == 0:
                 path = os.path.join(self.args.model_path, "phase1", f"phase1_win_{win_idx}.pth")
@@ -787,31 +791,31 @@ class TrainerSWinGS(Trainer4DGS):
                 path = os.path.join(self.args.model_path, "phase2", f"phase2_win_{win_idx}.pth")
             
             if os.path.exists(path):
-                # 1. 强行映射到 CPU，防止合并过程就把显存挤爆
+                # 1. 强行映射到 CPU
                 win_data = torch.load(path, weights_only=False)
                 
-                # 2. 【无损压缩核心逻辑】：遍历高斯参数，剥离巨无霸优化器状态
+                # 2. 剥离巨无霸优化器状态
                 compressed_win_data = []
                 for item in win_data:
-                    # 在 3DGS/4DGS 的 capture() 中，只有 optimizer.state_dict() 是字典类型
                     if isinstance(item, dict):
-                        # 识别到优化器状态，直接替换为空字典。这一步能减小 66% 的体积！
                         compressed_win_data.append({})
-                    elif isinstance(item, torch.Tensor):
-                        # 确保纯参数张量停留在 CPU 物理内存中
-                        compressed_win_data.append(item)
                     else:
                         compressed_win_data.append(item)
                 
-                # 将瘦身后的数据转回元组并存入超级字典
-                merged_windows[win_idx] = tuple(compressed_win_data)
+                # 3. [新增] 将当前窗口压缩后的 tuple 单独保存为 pth
+                compressed_filename = f"compressed_win_{win_idx}.pth"
+                compressed_save_path = os.path.join(compressed_dir, compressed_filename)
+                torch.save(tuple(compressed_win_data), compressed_save_path)
+                
+                # 4. [修改] 字典里只记录“相对路径”
+                merged_windows_paths[win_idx] = os.path.join("compressed_windows", compressed_filename)
                 
         final_super_dict = {
             "is_swings_sequence": True,  # 渲染器读取标志
             "window_blocks": self.window_blocks,
-            "models": merged_windows
+            "models": merged_windows_paths  # ⚠️ 注意：这里面存的全是字符串路径了！
         }
         
         save_path = os.path.join(self.args.model_path, f"chkpnt_{name_suffix}.pth")
         torch.save((final_super_dict, self.global_iter), save_path)
-        print(f"✅ 多窗口超级大模型已完成【无损瘦身压缩】，并保存至: {save_path}")
+        print(f"✅ 极致瘦身完成！索引已保存至: {save_path}，实体数据分离至 compressed_windows 文件夹。")

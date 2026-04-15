@@ -41,6 +41,8 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
         window_blocks = checkpoint_data["window_blocks"]
         models_dict = checkpoint_data["models"]
         current_loaded_win_idx = -1
+        # [新增] 获取主 checkpoint 所在的绝对目录，用于拼接后续子路径
+        base_model_dir = os.path.dirname(os.path.abspath(args.start_checkpoint))
     else:
         print("[渲染器] 📌 检测到传统单体模型，正在直接恢复权重...")
         gaussians.restore(checkpoint_data, None)
@@ -85,13 +87,15 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
                     
             # 3. 如果当前帧进入了新的窗口，立刻切换高斯模型参数（毫秒级切换，不影响渲染速度）
             if target_win_idx != current_loaded_win_idx:
-                gaussians.restore(models_dict[target_win_idx], None)
+                # 🚀 【按需动态加载核心】
+                rel_path = models_dict[target_win_idx]
+                abs_path = os.path.join(base_model_dir, rel_path)
+
+                # print(f"[渲染引擎] 正在换弹：加载窗口 {target_win_idx} 数据 -> {rel_path}")
+                win_data_tuple = torch.load(abs_path, weights_only=False)
+
+                gaussians.restore(win_data_tuple, None)
                 current_loaded_win_idx = target_win_idx
-                
-                # 同步更新生命周期掩码（服务于你的 Hybrid 逻辑）
-                if hasattr(gaussians, '_start_frame'):
-                    gaussians._start_frame[:] = window_blocks[target_win_idx][0]
-                    gaussians._expire_frame[:] = window_blocks[target_win_idx][1]
 
         # 4. 执行渲染
         render_pkg = render(cam, gaussians, pipe, background)
