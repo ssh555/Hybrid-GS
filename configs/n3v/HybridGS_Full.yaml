@@ -45,7 +45,7 @@ OptimizationParams:
   opacity_lr: 0.05
   scaling_lr: 0.005
   rotation_lr: 0.001
-  percent_dense: 0.01
+  percent_dense: 0.002
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
   densification_interval: 100 
