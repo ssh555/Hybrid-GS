@@ -137,7 +137,7 @@ def get_camera_metadata(scene, dataset_path):
         try:
             print(f"[缓存] 正在极速读取本地相机缓存文件: {cache_path}")
             # 从硬盘直接映射回内存
-            cache_data = torch.load(cache_path)
+            cache_data = torch.load(cache_path, weights_only=False)
             train_cams = cache_data["train_cams"]
             max_frames = cache_data["max_frames"]
             max_cams = cache_data["max_cams"]
