@@ -54,7 +54,6 @@ OptimizationParams:
   densify_until_iter: 15000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005  # [修复] 必须是直接的浮点数，不能写除法表达式
-  scale_t_threshold: 33.0
   densify_until_num_points: 35000000
   final_prune_from_iter: -1
   sh_increase_interval: 1000
