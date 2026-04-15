@@ -714,6 +714,7 @@ class TrainerSWinGS(Trainer4DGS):
                 self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
+        self.clean()
         print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
         self._save_merged_checkpoint(str(self.opt.iterations))
         # 最终评估和记录
@@ -774,6 +775,29 @@ class TrainerSWinGS(Trainer4DGS):
         os.makedirs(os.path.dirname(point_cloud_path), exist_ok=True)
         self.gaussians.save_ply(point_cloud_path)
 
+    def clean(self):
+        print("\n[系统管理] 训练阶段结束，正在执行极致内存释放，为合并大模型腾出空间...")
+        # 1. 切断对象的引用链（显式删除对象实例）
+        if hasattr(self, 'gaussians'):
+            del self.gaussians
+        if hasattr(self, 'scene'):
+            del self.scene
+        # 如果你还有其他的占用大户，比如渲染管线、背景缓存等，一并删除
+        if hasattr(self, 'pipe'):
+            del self.pipe
+        if hasattr(self, 'background'):
+            del self.background
+        if hasattr(self, 'window_cache'):  # 如果你有自己建的图像缓存池，务必清空
+            self.window_cache.clear()
+            del self.window_cache
+
+        # 2. 强制 Python 的垃圾回收器立即工作 (深度清理 CPU 内存 RAM)
+        gc.collect()
+
+        # 3. 清空 PyTorch 的 CUDA 显存缓存池 (彻底释放 GPU 显存 VRAM)
+        torch.cuda.empty_cache()
+        # 如果你用的是比较新的 PyTorch，甚至可以调用下面这行让显存碎片重新整理：
+        torch.cuda.ipc_collect()
 
     def _save_merged_checkpoint(self, name_suffix):
         """【极致瘦身解耦版】多窗口合并打包。数据与索引分离，彻底杜绝渲染器内存爆满。"""
