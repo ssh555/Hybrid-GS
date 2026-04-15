@@ -19,6 +19,7 @@ from utils.camera_utils import get_camera_metadata
 
 import concurrent.futures
 import threading
+import sys
 
 class RenderCam:
     def __init__(self, base_cam):
@@ -323,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--rot_4d", action="store_true", default=True)
     parser.add_argument("--force_sh_3d", action="store_true", default=True)
 
-    args = parser.parse_args()
+    args = parser.parse_args(sys.argv[1:])
 
     cfg = OmegaConf.load(args.config)
 
