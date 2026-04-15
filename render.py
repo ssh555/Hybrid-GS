@@ -101,7 +101,11 @@ def simple_render(dataset: ModelParams, pipe: PipelineParams, args):
         render_pkg = render(cam, gaussians, pipe, background)
         rendered_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
         img_np = (rendered_image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-        
+
+        save_path = os.path.join(render_dir, f"{cam.image_name}.png")
+        imageio.imwrite(save_path, img_np)
+        # ==========================================================
+
         frames_rgb.append(img_np)
 
     video_path = os.path.join(dataset.model_path, "single_view_reconstruction.mp4")
