@@ -714,9 +714,7 @@ class TrainerSWinGS(Trainer4DGS):
                 self.window_cache.clear()  # 释放当前窗口的图像缓存，准备下一个窗口
         
         # 【修复2：训练完毕后保存全局唯一的大模型】
-        self.clean()
-        print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
-        self._save_merged_checkpoint(str(self.opt.iterations))
+
         # 最终评估和记录
         self.metrics_tracker.record_training_stats(self.global_iter, 0, self.gaussians.get_xyz.shape[0])
         # self.evaluate(iteration=self.global_iter, start_frame=0, end_frame=self.total_frames - 1, tag="FINAL_GLOBAL")
@@ -731,6 +729,10 @@ class TrainerSWinGS(Trainer4DGS):
         
         self.metrics_tracker.save_log(os.path.join(self.args.model_path, f"{self.__class__.__name__}_metrics.json"))
         self._draw_metrics_chart()
+
+        self.clean()
+        print(f"\n🎉 训练完毕！正在生成全序列最终标准大模型: chkpnt_{self.opt.iterations}.pth")
+        self._save_merged_checkpoint(str(self.opt.iterations))
 
     def _draw_metrics_chart(self):
         """完全保留你原版代码的双Y轴 Matplotlib 绘图"""
